@@ -1069,6 +1069,29 @@ fn configure_env_for_scripts_run(
     let paths_fs = bun_paths::fs::FileSystem::instance();
     this.env_mut().load_ccache_path(paths_fs);
 
+    #[cfg(target_env = "ohos")]
+    {
+        // OHOS: node-gyp needs CC/CXX. OHOS SDK clang (LLVM 15) lacks C++20
+        // <source_location>; route to a newer clang via $OHOS_CC/$OHOS_CXX,
+        // else fall back to PATH clang. Set on the GLOBAL install env so all
+        // install modes (hoisted + isolated) inherit it into lifecycle scripts.
+        let env = this.env_mut();
+        if env.get(b"CC").is_none() {
+            if let Ok(cc) = std::env::var("OHOS_CC") {
+                let _ = env.map.put(b"CC", cc.as_bytes());
+            } else {
+                let _ = env.map.put(b"CC", b"clang");
+            }
+        }
+        if env.get(b"CXX").is_none() {
+            if let Ok(cxx) = std::env::var("OHOS_CXX") {
+                let _ = env.map.put(b"CXX", cxx.as_bytes());
+            } else {
+                let _ = env.map.put(b"CXX", b"clang++");
+            }
+        }
+    }
+
     {
         // Run node-gyp jobs in parallel.
         // https://github.com/nodejs/node-gyp/blob/7d883b5cf4c26e76065201f85b0be36d5ebdcc0e/lib/build.js#L150-L184
