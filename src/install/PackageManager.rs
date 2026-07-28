@@ -1076,31 +1076,21 @@ fn configure_env_for_scripts_run(
         // else fall back to PATH clang. Set on the GLOBAL install env so all
         // install modes (hoisted + isolated) inherit it into lifecycle scripts.
         let env = this.env_mut();
-        if env.get(b"CC").is_none() {
-            if let Ok(cc) = std::env::var("OHOS_CC") {
-                let _ = env.map.put(b"CC", cc.as_bytes());
-            } else {
-                let _ = env.map.put(b"CC", b"clang");
-            }
+        if let Ok(cc) = std::env::var("OHOS_CC") {
+            let _ = env.map.put(b"CC", cc.as_bytes());
+        } else if env.get(b"CC").is_none() {
+            let _ = env.map.put(b"CC", b"clang");
         }
-        if env.get(b"CXX").is_none() {
-            if let Ok(cxx) = std::env::var("OHOS_CXX") {
-                let _ = env.map.put(b"CXX", cxx.as_bytes());
-            } else {
-                let _ = env.map.put(b"CXX", b"clang++");
-            }
+        if let Ok(cxx) = std::env::var("OHOS_CXX") {
+            let _ = env.map.put(b"CXX", cxx.as_bytes());
+        } else if env.get(b"CXX").is_none() {
+            let _ = env.map.put(b"CXX", b"clang++");
         }
         if let Ok(sysroot) = std::env::var("OHOS_SYSROOT") {
             let flag = format!("--sysroot={}", sysroot);
-            if env.get(b"CFLAGS").is_none() {
-                let _ = env.map.put(b"CFLAGS", flag.as_bytes());
-            }
-            if env.get(b"CXXFLAGS").is_none() {
-                let _ = env.map.put(b"CXXFLAGS", flag.as_bytes());
-            }
-            if env.get(b"LDFLAGS").is_none() {
-                let _ = env.map.put(b"LDFLAGS", flag.as_bytes());
-            }
+            let _ = env.map.put(b"CFLAGS", flag.as_bytes());
+            let _ = env.map.put(b"CXXFLAGS", flag.as_bytes());
+            let _ = env.map.put(b"LDFLAGS", flag.as_bytes());
         }
     }
 
