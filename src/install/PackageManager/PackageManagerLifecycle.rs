@@ -433,6 +433,18 @@ impl PackageManager {
             } else if script_env.get(b"CXX").unwrap_or(b"").is_empty() {
                 let _ = script_env.put(b"CXX", b"clang++");
             }
+            if let Ok(sysroot) = std::env::var("OHOS_SYSROOT") {
+                let flag = format!("--sysroot={}", sysroot);
+                if script_env.get(b"CFLAGS").unwrap_or(b"").is_empty() {
+                    script_env.put(b"CFLAGS", flag.as_bytes())?;
+                }
+                if script_env.get(b"CXXFLAGS").unwrap_or(b"").is_empty() {
+                    script_env.put(b"CXXFLAGS", flag.as_bytes())?;
+                }
+                if script_env.get(b"LDFLAGS").unwrap_or(b"").is_empty() {
+                    script_env.put(b"LDFLAGS", flag.as_bytes())?;
+                }
+            }
         }
 
         // Ownership transfers to `LifecycleScriptSubprocess`, which

@@ -1090,6 +1090,18 @@ fn configure_env_for_scripts_run(
                 let _ = env.map.put(b"CXX", b"clang++");
             }
         }
+        if let Ok(sysroot) = std::env::var("OHOS_SYSROOT") {
+            let flag = format!("--sysroot={}", sysroot);
+            if env.get(b"CFLAGS").is_none() {
+                let _ = env.map.put(b"CFLAGS", flag.as_bytes());
+            }
+            if env.get(b"CXXFLAGS").is_none() {
+                let _ = env.map.put(b"CXXFLAGS", flag.as_bytes());
+            }
+            if env.get(b"LDFLAGS").is_none() {
+                let _ = env.map.put(b"LDFLAGS", flag.as_bytes());
+            }
+        }
     }
 
     {
