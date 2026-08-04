@@ -305,91 +305,51 @@ jobs:
           path: build/ohos-icu
           key: ohos-icu-78-llvm${{ env.LLVM_VERSION }}
 
-      - name: Cross-compile ICU 78 for aarch64-linux-ohos
+      - name: Extract ICU 78 from social4hyq bottle
         if: steps.icu-cache.outputs.cache-hit != 'true'
         run: |
           set -e
           LLVM=/opt/llvm-22
-          SYSROOT=$OHOS_SYSROOT
-          ICU_SRC=/tmp/icu-src
-          ICU_HOST=/tmp/icu-host-build
           ICU_TARGET_DIR=$GITHUB_WORKSPACE/build/ohos-icu/target
           ICU_HOST_DIR=$GITHUB_WORKSPACE/build/ohos-icu/host
-          export PATH="$LLVM/bin:$PATH"
+          # Cross-compiling ICU 78 from source on bare ubuntu fails: clang
+          # --target=aarch64-linux-ohos auto-adds crtbeginS.o (GCC crt, not
+          # in OHOS musl sysroot) + libclang_rt.builtins.a (official llvm-22
+          # has no OHOS compiler-rt). self-hosted never configure/builds ICU
+          # (preinstalled). The social4hyq icu4c@78 bottle is a prebuilt
+          # OHOS-musl ICU 78.3 — extract its .a + headers directly. ICU is a
+          # platform-independent static lib (version 78.3 pinned, no drift
+          # risk unlike bun-webkit). This is the only remaining social4hyq
+          # dependency; everything else is decoupled.
+          BOTTLE_URL="https://github.com/social4hyq/homebrew-core/releases/download/icu4c%4078-v78.3-r10/icu4c%4078-78.3_2.arm64_ohos.bottle.tar.gz"
+          echo "=== downloading icu4c@78 bottle ==="
+          curl -fsSL -o /tmp/icu-bottle.tar.gz "$BOTTLE_URL"
+          mkdir -p /tmp/icu-bottle
+          tar xzf /tmp/icu-bottle.tar.gz -C /tmp/icu-bottle
+          ICU_PREFIX=$(find /tmp/icu-bottle -type d -name "icu4c@78" -path "*/lib/*" | head -1)
+          [ -z "$ICU_PREFIX" ] && ICU_PREFIX=$(find /tmp/icu-bottle -type d -name "icu4c@78" | head -1)
+          echo "ICU prefix: $ICU_PREFIX"
+          test -d "$ICU_PREFIX/lib" || { echo "FATAL: ICU bottle lib dir not found"; find /tmp/icu-bottle -maxdepth 4 -type d | head -20; exit 1; }
 
-          # Download ICU 78 source
-          if [ ! -d "$ICU_SRC" ]; then
-            curl -fsSL -o /tmp/icu-src.tgz "$ICU_URL"
-            mkdir -p "$ICU_SRC"
-            tar xzf /tmp/icu-src.tgz -C "$ICU_SRC" --strip-components=1
-            rm /tmp/icu-src.tgz
-          fi
-
-          # Stage 1: ICU host tools (native linux-gnu for genrb/genccode/gencmn/pkgdata)
-          echo "=== Stage 1: ICU host tools ==="
-          rm -rf "$ICU_HOST" && mkdir -p "$ICU_HOST"
-          cd "$ICU_HOST"
-          "$ICU_SRC/source/runConfigureICU" Linux \
-            --disable-shared --enable-static \
-            --prefix=/tmp/icu-host-install
-          make -j$(nproc)
-          make install
-
-          # Stage 2: cross-compile ICU for aarch64-linux-ohos
-          echo "=== Stage 2: ICU target (aarch64-linux-ohos) ==="
-          ICU_TARGET=/tmp/icu-target-build
-          rm -rf "$ICU_TARGET" && mkdir -p "$ICU_TARGET"
-          cd "$ICU_TARGET"
-          TARGET_CFLAGS="--target=aarch64-linux-ohos --sysroot=$SYSROOT -D__MUSL__ -I$SYSROOT/usr/include -fPIC"
-          CROSS_LIBS=$GITHUB_WORKSPACE/build/ohos-cross-libs
-          TARGET_CXXFLAGS="$TARGET_CFLAGS -nostdinc++ -I$CROSS_LIBS/libcxx/include/v1 -I$CROSS_LIBS/libcxxabi/include"
-          # LDFLAGS: official llvm-22 has no aarch64-linux-ohos compiler-rt
-          # (libclang_rt.builtins.a) and the OHOS sysroot has no GCC crt
-          # (crtbeginS.o). Use -nodefaultlibs + explicit crt/libs from sysroot
-          # + our self-compiled libunwind to bypass clang auto-discovery.
-          SYSROOT_LIB="$SYSROOT/usr/lib/aarch64-linux-ohos"
-          TARGET_LDFLAGS="--target=aarch64-linux-ohos --sysroot=$SYSROOT -nodefaultlibs \
-            -L$CROSS_LIBS/libunwind/lib -L$SYSROOT_LIB \
-            $SYSROOT_LIB/Scrt1.o $SYSROOT_LIB/crti.o $SYSROOT_LIB/crtn.o \
-            -lc -lunwind"
-          "$ICU_SRC/source/configure" \
-            --host=aarch64-linux-ohos \
-            --prefix=/tmp/icu-target-install \
-            --disable-shared --enable-static \
-            --with-cross-build=/tmp/icu-host-install \
-            CC="$LLVM/bin/clang" CXX="$LLVM/bin/clang++" \
-            AR="$LLVM/bin/llvm-ar" RANLIB="$LLVM/bin/llvm-ranlib" STRIP="$LLVM/bin/llvm-strip" \
-            CFLAGS="$TARGET_CFLAGS" CXXFLAGS="$TARGET_CXXFLAGS" \
-            LDFLAGS="$TARGET_LDFLAGS" \
-            --disable-layout --disable-layoutex \
-            --with-data-packaging=static || {
-              echo "=== ICU configure FAILED — config.log tail ==="
-              tail -60 /tmp/icu-target-build/config.log 2>/dev/null || echo "(no config.log)"
-              echo "=== direct clang link test ==="
-              echo 'int main(){return 0;}' > /tmp/ictest.c
-              "$LLVM/bin/clang" --target=aarch64-linux-ohos --sysroot="$SYSROOT" -D__MUSL__ -I"$SYSROOT/usr/include" /tmp/ictest.c -o /tmp/ictest -lc 2>&1 || echo "clang link test failed (rc=$?)"
-              exit 1
-            }
-          # Build only — do NOT make install: ICU cross-compile make install
-          # triggers a re-configure that re-checks the C compiler, and that
-          # re-check fails (env/flags not fully inherited). The .a + headers
-          # are in the build dir; copy them directly.
-          make -j$(nproc) || true
-
-          # Install into layout flags.ts expects (from build dir, not install)
+          # Install into layout flags.ts expects
           mkdir -p "$ICU_TARGET_DIR/include" "$ICU_TARGET_DIR/lib" "$ICU_HOST_DIR/bin"
-          cp -a "$ICU_TARGET/include/unicode" "$ICU_TARGET_DIR/include/unicode" 2>/dev/null || \
-            cp -a "$ICU_SRC/source/common/unicode" "$ICU_TARGET_DIR/include/unicode"
+          cp -a "$ICU_PREFIX/include/unicode" "$ICU_TARGET_DIR/include/unicode" 2>/dev/null || \
+            cp -a "$ICU_PREFIX/include/"*.h "$ICU_TARGET_DIR/include/" 2>/dev/null || true
           for a in libicudata.a libicui18n.a libicuuc.a; do
-            cp "$ICU_TARGET/lib/$a" "$ICU_TARGET_DIR/lib/" 2>/dev/null || true
+            cp "$ICU_PREFIX/lib/$a" "$ICU_TARGET_DIR/lib/" 2>/dev/null || true
           done
-          # libicudata is in stubdata/ when data-packaging=static
-          cp "$ICU_TARGET/stubdata/libicudata.a" "$ICU_TARGET_DIR/lib/" 2>/dev/null || true
-          for t in genrb genccode gencmn pkgdata; do
-            cp /tmp/icu-host-install/bin/$t "$ICU_HOST_DIR/bin/" 2>/dev/null || true
+          # Host tools (run on build host, not target)
+          for t in genrb genccode gencmn pkgdata icupkg; do
+            cp "$ICU_PREFIX/bin/$t" "$ICU_HOST_DIR/bin/" 2>/dev/null || true
           done
           echo "=== ICU target libs ==="
           ls -lh "$ICU_TARGET_DIR/lib/"
+          echo "=== ICU headers ==="
+          ls "$ICU_TARGET_DIR/include/unicode/" 2>/dev/null | head -5
+          # Verify .a are aarch64 OHOS ELF
+          "$LLVM/bin/llvm-readelf" -h "$ICU_TARGET_DIR/lib/libicuuc.a" 2>/dev/null | grep -q "AArch64" || \
+            echo "WARNING: libicuuc.a not AArch64 (may be wrong arch)"
+          rm -rf /tmp/icu-bottle /tmp/icu-bottle.tar.gz
 
       - name: Verify cross-libs + ICU
         run: |
