@@ -326,9 +326,11 @@ jobs:
           curl -fsSL -o /tmp/icu-bottle.tar.gz "$BOTTLE_URL"
           mkdir -p /tmp/icu-bottle
           tar xzf /tmp/icu-bottle.tar.gz -C /tmp/icu-bottle
-          ICU_PREFIX=$(find /tmp/icu-bottle -type d -name "icu4c@78" -path "*/lib/*" | head -1)
-          [ -z "$ICU_PREFIX" ] && ICU_PREFIX=$(find /tmp/icu-bottle -type d -name "icu4c@78" | head -1)
+          # Bottle layout: icu4c@78/78.3_2/{lib,bin,include} (version subdir)
+          ICU_PREFIX=$(find /tmp/icu-bottle -type f -name "libicuuc.a" -path "*/lib/*" | head -1 | xargs dirname | xargs dirname)
+          [ -z "$ICU_PREFIX" ] && { echo "FATAL: ICU bottle libicuuc.a not found"; find /tmp/icu-bottle -maxdepth 4 -type d | head -20; exit 1; }
           echo "ICU prefix: $ICU_PREFIX"
+          test -d "$ICU_PREFIX/lib" || { echo "FATAL: ICU bottle lib dir not found"; exit 1; }
           test -d "$ICU_PREFIX/lib" || { echo "FATAL: ICU bottle lib dir not found"; find /tmp/icu-bottle -maxdepth 4 -type d | head -20; exit 1; }
 
           # Install into layout flags.ts expects
