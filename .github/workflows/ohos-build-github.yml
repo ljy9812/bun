@@ -118,13 +118,16 @@ jobs:
         run: |
           RUST_HOME=$HOME/.rust
           mkdir -p "$RUST_HOME"
+          export RUSTUP_HOME="$RUST_HOME"
+          export CARGO_HOME="$RUST_HOME/cargo"
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
             --default-toolchain "$RUST_VER" \
             --profile minimal \
             --component rust-src \
-            --target aarch64-unknown-linux-ohos \
-            --prefix "$RUST_HOME"
+            --target aarch64-unknown-linux-ohos
           echo "RUST_HOME=$RUST_HOME" >> $GITHUB_ENV
+          echo "RUSTUP_HOME=$RUST_HOME" >> $GITHUB_ENV
+          echo "CARGO_HOME=$RUST_HOME/cargo" >> $GITHUB_ENV
           echo "$RUST_HOME/bin" >> $GITHUB_PATH
           source "$RUST_HOME/env"
           rustc --version
