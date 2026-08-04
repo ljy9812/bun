@@ -353,7 +353,14 @@ jobs:
             CFLAGS="$TARGET_CFLAGS" CXXFLAGS="$TARGET_CXXFLAGS" \
             LDFLAGS="--target=aarch64-linux-ohos --sysroot=$SYSROOT" \
             --disable-layout --disable-layoutex \
-            --with-data-packaging=static
+            --with-data-packaging=static || {
+              echo "=== ICU configure FAILED — config.log tail ==="
+              tail -60 /tmp/icu-target-build/config.log 2>/dev/null || echo "(no config.log)"
+              echo "=== direct clang link test ==="
+              echo 'int main(){return 0;}' > /tmp/ictest.c
+              "$LLVM/bin/clang" --target=aarch64-linux-ohos --sysroot="$SYSROOT" -D__MUSL__ -I"$SYSROOT/usr/include" /tmp/ictest.c -o /tmp/ictest -lc 2>&1 || echo "clang link test failed (rc=$?)"
+              exit 1
+            }
           # Build only — do NOT make install: ICU cross-compile make install
           # triggers a re-configure that re-checks the C compiler, and that
           # re-check fails (env/flags not fully inherited). The .a + headers
