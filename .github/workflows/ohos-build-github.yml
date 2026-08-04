@@ -421,6 +421,23 @@ jobs:
             sed -i "s/-lpthreads/-lpthread/g" build/release-ohos/deps/WebKit/build.ninja
           fi
 
+          # Patch #5: WebKit link commands need -nodefaultlibs -nostartfiles
+          # + explicit musl crt. Official llvm-22 has no aarch64-linux-ohos
+          # compiler-rt (libclang_rt.builtins.a) and OHOS musl sysroot has no
+          # GCC crt (crtbeginS.o). clang --target=aarch64-linux-ohos auto-adds
+          # both, failing WebKit link (LLIntSettingsExtractor etc). The
+          # CMAKE_EXE_LINKER_FLAGS from webkit.ts adds -lc++ -lunwind but not
+          # -nodefaultlibs, so clang still auto-discovers crt/compiler-rt.
+          # Inject -nodefaultlibs -nostartfiles + explicit Scrt1.o/crti.o/
+          # crtn.o + -lc into every WebKit link command (identified by
+          # --target=aarch64-linux-ohos). Harmless: precise crt specification.
+          if [ -f build/release-ohos/deps/WebKit/build.ninja ]; then
+            SYSROOT_LIB="$SYSROOT/usr/lib/aarch64-linux-ohos"
+            sed -i "s|--target=aarch64-linux-ohos|-nodefaultlibs -nostartfiles $SYSROOT_LIB/Scrt1.o $SYSROOT_LIB/crti.o $SYSROOT_LIB/crtn.o --target=aarch64-linux-ohos|g" \
+              build/release-ohos/deps/WebKit/build.ninja
+            echo "patched WebKit link with -nodefaultlibs + musl crt ($(grep -c nodefaultlibs build/release-ohos/deps/WebKit/build.ninja) links)"
+          fi
+
           # Patch #1: dep_host_cc -> /usr/bin/clang (LLVM 22 cant find GCC runtime)
           if grep -q "llvm-22/bin/clang \$flags -o \$out \$in" build/release-ohos/build.ninja 2>/dev/null; then
             sed -i 's|command = .*/llvm-22/bin/clang $flags -o $out $in|command = /usr/bin/clang $flags -o $out $in|' \
