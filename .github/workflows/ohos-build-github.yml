@@ -291,8 +291,10 @@ jobs:
           for a in libc++.a libc++abi.a; do
             lib="$CROSS/libcxx/lib/$a"
             [ -f "$CROSS/libcxxabi/lib/$a" ] && lib="$CROSS/libcxxabi/lib/$a"
-            n1=$("$LLVM/bin/llvm-nm" "$lib" 2>/dev/null | grep -c "St4__n1")
-            hh=$("$LLVM/bin/llvm-nm" "$lib" 2>/dev/null | grep -c "St3__h")
+            # grep -c returns exit 1 on 0 matches — guard with || true
+            # (set -e would otherwise kill the step on a clean __n1-only lib).
+            n1=$("$LLVM/bin/llvm-nm" "$lib" 2>/dev/null | grep -c "St4__n1" || true)
+            hh=$("$LLVM/bin/llvm-nm" "$lib" 2>/dev/null | grep -c "St3__h" || true)
             echo "$a: __n1=$n1 __h=$hh"
           done
 
