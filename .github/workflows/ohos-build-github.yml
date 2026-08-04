@@ -261,17 +261,32 @@ jobs:
           # break the link with undefined-symbol errors mixing __h and __n1.
           key: webkit-ohos-github-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}-abi-n1
 
-      - name: Purge stale WebKit + cross-libs build dir
-        # actions/checkout does NOT clean build artifacts; a previous run on
-        # this runner may have left .o files compiled against the old __h
-        # libc++ ABI. ninja incremental would reuse them, mixing __h and __n1
-        # symbols at link time. Wipe deps/WebKit and ohos-cross-libs so the
-        # scaffold + configure-WebKit below rebuilds every .o against the
-        # current __n1 headers. Cheap relative to a full WebKit compile and
-        # avoids the ABI-mismatch link failure.
-        run: rm -rf build/release-ohos/deps/WebKit build/ohos-cross-libs
+      - name: Purge stale cross-libs build dir
+        # actions/checkout does NOT clean build artifacts; a previous run may
+        # have left .o files compiled against the old __h libc++ ABI. Wipe
+        # ohos-cross-libs so the self-compile below rebuilds every .a against
+        # __n1. deps/WebKit is handled by the WebKit cache key (abi-n1).
+        run: rm -rf build/ohos-cross-libs
 
-      - name: Scaffold OHOS cross-libs + ICU
+      # Self-compile libcxx/libcxxabi/libunwind with __n1 ABI from LLVM source.
+      # The OHOS device libc++_shared.so / libv8_shared.so export std::__n1::*
+      # (OHOS sets _LIBCPP_ABI_NAMESPACE=__n1). Every available prebuilt .a
+      # (llvm@21 bottle, OHOS SDK bottle) is __h — symlinking either produces
+      # __h symbols that the device loader cannot resolve (v8::Array::New
+      # ... std::function -> symbol not found). The self-hosted runner avoids
+      # this with a preinstalled self-compiled __n1 cross-libs; github-hosted
+      # must build the same from source. Mirrors social4hyq llvm@21.rb formula
+      # build_multiarch_runtimes, with the one change __h -> __n1. Cached so
+      # only the first run on a toolchain version pays the ~10min cost.
+      - name: Cache self-compiled __n1 libcxx
+        id: libcxx-cache
+        uses: actions/cache@v4
+        with:
+          path: build/ohos-cross-libs
+          key: ohos-libcxx-n1-llvm21.1.8-2
+
+      - name: Self-compile __n1 libcxx + libcxxabi + libunwind
+        if: steps.libcxx-cache.outputs.cache-hit != 'true'
         run: |
           docker exec "$CONTAINER" bash -lc '
             set -e
@@ -279,59 +294,145 @@ jobs:
             cd "'"$WORK_IN_CONTAINER"'"
             LLVM=$(brew --prefix llvm@21)
             SDK=$(brew --prefix ohos-sdk)
-            ICU=$(brew --prefix icu4c@78)
+            SYSROOT="$SDK/native/sysroot"
             CROSS=build/ohos-cross-libs
-            mkdir -p "$CROSS/libcxx/include" "$CROSS/libcxxabi/include"
-            # OHOS libc++ ABI: device libc++.so / libv8_shared.so export
-            # std::__n1::* (OHOS sets _LIBCPP_ABI_NAMESPACE=__n1). llvm@21
-            # aarch64-linux-ohos c++/v1 headers define __h. Two constraints:
-            #   1. headers must be the full llvm@21 tree (1680 files, C++23:
-            #      <expected>, <print>, <mdspan>) — the OHOS SDK libcxx-ohos
-            #      tree is an old LLVM-15 freeze (792 files, no <expected>)
-            #      and breaks the WebKit gnu++23 compile.
-            #   2. symbols must mangle as __n1 to match the device libc++.so.
-            # Solution: copy the llvm@21 header tree (constraint 1) and
-            # in-place rewrite ONLY the ABI namespace line in __config_site
-            # from __h to __n1 (constraint 2). Do NOT swap the whole
-            # __config_site — the OHOS one is an LLVM-15 freeze missing
-            # _LIBCPP_HARDENING_MODE_DEFAULT, which llvm@21 __config requires
-            # (breaks std::scoped_lock / std::this_thread / LockHolder). One
-            # sed line, everything else in __config_site stays llvm@21-native.
-            # The .a libs MUST be the OHOS SDK ones (__n1 symbols) — linking
-            # llvm@21 .a (__h) against __n1-compiled objects leaves
-            # std::__n1::mutex::lock etc. undefined. Headers llvm@21 (C++23
-            # surface is header-only, no .a needed) + libs OHOS (__n1 ABI).
-            # NOTE: no apostrophes below — single-quoted docker exec heredoc.
-            STD_LIBCXX="$LLVM/include/aarch64-linux-ohos/c++/v1"
-            OHOS_LIBCXX="$SDK/native/llvm/include/libcxx-ohos/include/c++/v1"
-            test -f "$STD_LIBCXX/__config_site" || { echo "ERROR: llvm@21 libcxx headers missing at $STD_LIBCXX"; exit 1; }
-            test -f "$OHOS_LIBCXX/__config_site" || { echo "ERROR: OHOS libcxx-ohos headers missing at $OHOS_LIBCXX"; exit 1; }
-            grep -q "define _LIBCPP_ABI_NAMESPACE __n1" "$OHOS_LIBCXX/__config_site" || { echo "ERROR: OHOS headers do not define __n1 ABI namespace"; exit 1; }
-            rm -rf "$CROSS/libcxx/include/v1"
-            cp -a "$STD_LIBCXX" "$CROSS/libcxx/include/v1"
-            # Rewrite the single ABI namespace line __h -> __n1 in place.
-            sed -i "s/^#define _LIBCPP_ABI_NAMESPACE __h/#define _LIBCPP_ABI_NAMESPACE __n1/" "$CROSS/libcxx/include/v1/__config_site"
-            grep -q "define _LIBCPP_ABI_NAMESPACE __n1" "$CROSS/libcxx/include/v1/__config_site" || { echo "ERROR: failed to rewrite ABI namespace to __n1"; exit 1; }
-            # libcxxabi headers: llvm@21 ships them under the same c++/v1 tree
-            # (cxxabi.h, __cxxabi_config.h), so one include dir covers both.
-            ln -sfn "$CROSS/libcxx/include/v1" "$CROSS/libcxxabi/include"
-            # Static .a libs: use the OHOS SDK ones (symbols mangle __n1,
-            # matching the headers). llvm@21 .a are __h — linking them
-            # against __n1-compiled objects leaves std::__n1::mutex::lock()
-            # etc. undefined (the link fails inside WebKit JSC). The OHOS .a
-            # are LLVM-15-built but implement the same stable libc++ ABI the
-            # headers declare (mutex/condition_variable/string/sort/once) —
-            # the C++23 surface (<expected>, <print>) is header-only, no .a
-            # symbol needed. OHOS libc++.a is thin (most of libc++ is
-            # header-inline); libc++abi.a carries the bulk of __n1 symbols.
-            for d in libcxx libcxxabi libunwind; do
-              mkdir -p "$CROSS/$d/lib"
-              for a in "$SDK/native/llvm/lib/aarch64-linux-ohos"/*.a; do
-                ln -sfn "$a" "$CROSS/$d/lib/$(basename "$a")"
-              done
+            SRC=/tmp/llvm-project
+            RT=$SRC/runtimes
+
+            # 1. Fetch LLVM source (runtimes/ subdirectory is all we need).
+            if [ ! -d "$RT" ]; then
+              echo "=== downloading llvm-project-21.1.8 source ==="
+              rm -rf "$SRC" /tmp/llvm-src.tar.xz
+              curl -fsSL -o /tmp/llvm-src.tar.xz "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/llvm-project-21.1.8.src.tar.xz"
+              mkdir -p "$SRC"
+              tar xf /tmp/llvm-src.tar.xz -C "$SRC" --strip-components=1
+              rm -f /tmp/llvm-src.tar.xz
+              echo "extracted: $(find "$RT" -maxdepth 1 -type d | wc -l) runtime dirs"
+            fi
+
+            # Toolchain: llvm@21 clang + OHOS sysroot. cflags mirror the
+            # social4hyq llvm@21.rb build_multiarch_runtimes formula exactly.
+            export PATH="$LLVM/bin:$PATH"
+            CFLAGS="--target=aarch64-linux-ohos --sysroot=$SYSROOT -D__MUSL__ -I$SYSROOT/usr/include -fPIC -fstack-protector-strong"
+            CXXFLAGS_UNWIND="$CFLAGS -nostdinc++"
+            # Stage 2 CXX flags do NOT use -nostdinc++ (formula line 54 uses
+            # plain cflags): libcxx compiles its own headers first, then uses
+            # them; -nostdinc++ there breaks internal header resolution.
+
+            # The brew llvm@21 bottle ships lib/cmake/{llvm,clang} config
+            # files (LLVMExports.cmake, ClangConfig.cmake) that reference
+            # libLLVMDemangle.a and other static libs the bottle strips.
+            # libcxx Stage 2 cmake calls find_package(Clang) -> find_package
+            # (LLVM) -> loads LLVMExports.cmake -> FATAL_ERROR on the missing
+            # .a. The formula avoids this because it builds from a full LLVM
+            # source tree where those .a exist. Stub the missing archives so
+            # the imported-target existence check passes; runtimes build never
+            # links them (it only compiles libcxx/libcxxabi/libunwind).
+            STUBLIBS="libLLVMDemangle.a libLLVMSupport.a libLLVMTarget.a \
+                      libclangAST.a libclangBasic.a libclangFrontend.a \
+                      libclangLex.a libclangSema.a libclangSerialization.a"
+            for sl in $STUBLIBS; do
+              [ -f "$LLVM/lib/$sl" ] || "$LLVM/bin/llvm-ar" rcs "$LLVM/lib/$sl" 2>/dev/null || true
             done
+
+            # 2. Stage 1: libunwind standalone (needed before libcxxabi).
+            echo "=== Stage 1: libunwind ==="
+            BUILD1=/tmp/libcxx-build-unwind
+            rm -rf "$BUILD1" && mkdir -p "$BUILD1"
+            cmake -S "$RT" -B "$BUILD1" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLLVM_ENABLE_RUNTIMES="libunwind" \
+              -DCMAKE_C_COMPILER="$LLVM/bin/clang" \
+              -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" \
+              -DCMAKE_AR="$LLVM/bin/llvm-ar" \
+              -DCMAKE_RANLIB="$LLVM/bin/llvm-ranlib" \
+              -DCMAKE_SYSTEM_NAME=Linux \
+              -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+              -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+              -DCMAKE_C_FLAGS="$CFLAGS" \
+              -DCMAKE_CXX_FLAGS="$CXXFLAGS_UNWIND" \
+              -DLIBUNWIND_ENABLE_SHARED=OFF \
+              -DLIBUNWIND_USE_COMPILER_RT=ON \
+              -DLIBUNWIND_HAS_MUSL_LIBC=ON
+            ninja -C "$BUILD1"
+
+            # 3. Stage 2: libcxx + libcxxabi + libunwind combined, __n1 ABI.
+            echo "=== Stage 2: libcxx + libcxxabi + libunwind (ABI __n1) ==="
+            BUILD2=/tmp/libcxx-build
+            rm -rf "$BUILD2" && mkdir -p "$BUILD2"
+            cmake -S "$RT" -B "$BUILD2" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
+              -DCMAKE_C_COMPILER="$LLVM/bin/clang" \
+              -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" \
+              -DCMAKE_AR="$LLVM/bin/llvm-ar" \
+              -DCMAKE_RANLIB="$LLVM/bin/llvm-ranlib" \
+              -DCMAKE_SYSTEM_NAME=Linux \
+              -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+              -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+              -DCMAKE_C_FLAGS="$CFLAGS" \
+              -DCMAKE_CXX_FLAGS="$CFLAGS" \
+              -DLIBCXX_ENABLE_SHARED=OFF \
+              -DLIBCXXABI_ENABLE_SHARED=OFF \
+              -DLIBUNWIND_ENABLE_SHARED=OFF \
+              -DLIBCXX_CXX_ABI=libcxxabi \
+              -DLIBCXX_ABI_NAMESPACE=__n1 \
+              -DLIBCXX_HAS_MUSL_LIBC=ON \
+              -DLIBCXX_HAS_PTHREAD_API=ON \
+              -DLIBCXXABI_USE_LLVM_UNWINDER=ON \
+              -DLIBCXXABI_ENABLE_STATIC_UNWINDER=ON \
+              -DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON \
+              -DLIBCXXABI_STATICALLY_LINK_UNWINDER_IN_STATIC_LIBRARY=OFF \
+              -DLIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF \
+              -DLIBCXX_USE_COMPILER_RT=ON \
+              -DLIBCXXABI_USE_COMPILER_RT=ON \
+              -DLIBUNWIND_USE_COMPILER_RT=ON
+            ninja -C "$BUILD2" cxx cxxabi unwind
+
+            # 4. Install into cross-libs layout flags.ts expects.
+            echo "=== install into $CROSS ==="
+            mkdir -p "$CROSS/libcxx/include" "$CROSS/libcxxabi/include" "$CROSS/libunwind/include"
+            mkdir -p "$CROSS/libcxx/lib" "$CROSS/libcxxabi/lib" "$CROSS/libunwind/lib"
+            # Headers (cmake generates __config_site with __n1 automatically
+            # via -DLIBCXX_ABI_NAMESPACE=__n1): install the c++/v1 tree.
+            cp -a "$BUILD2/include/c++/v1" "$CROSS/libcxx/include/v1" 2>/dev/null || \
+              cp -a "$LLVM/include/aarch64-linux-ohos/c++/v1" "$CROSS/libcxx/include/v1"
+            ln -sfn "$CROSS/libcxx/include/v1" "$CROSS/libcxxabi/include"
+            # Static archives.
+            cp "$BUILD2/lib/aarch64-linux-ohos/libc++.a" "$CROSS/libcxx/lib/libc++.a" 2>/dev/null || \
+              cp "$BUILD2/lib/libc++.a" "$CROSS/libcxx/lib/libc++.a"
+            cp "$BUILD2/lib/aarch64-linux-ohos/libc++abi.a" "$CROSS/libcxxabi/lib/libc++abi.a" 2>/dev/null || \
+              cp "$BUILD2/lib/libc++abi.a" "$CROSS/libcxxabi/lib/libc++abi.a"
+            cp "$BUILD1/lib/aarch64-linux-ohos/libunwind.a" "$CROSS/libunwind/lib/libunwind.a" 2>/dev/null || \
+              cp "$BUILD1/lib/libunwind.a" "$CROSS/libunwind/lib/libunwind.a"
+
             echo "=== __config_site ABI marker (must be __n1) ==="
             grep -nE "_LIBCPP_ABI_NAMESPACE|_LIBCPP_ABI_VERSION" "$CROSS/libcxx/include/v1/__config_site"
+            echo "=== .a symbol ABI check (must be __n1) ==="
+            for a in libc++.a libc++abi.a; do
+              lib="$CROSS/libcxx/lib/$a"
+              [ -f "$CROSS/libcxxabi/lib/$a" ] && lib="$CROSS/libcxxabi/lib/$a"
+              n1=$("$LLVM/bin/llvm-nm" "$lib" 2>/dev/null | grep -c "St4__n1")
+              hh=$("$LLVM/bin/llvm-nm" "$lib" 2>/dev/null | grep -c "St3__h")
+              echo "$a: __n1=$n1 __h=$hh"
+            done
+            echo "=== libcxx self-compile done ==="
+          '
+
+      - name: Scaffold ICU + verify cross-libs
+        run: |
+          docker exec "$CONTAINER" bash -lc '
+            set -e
+            . /etc/profile.d/brew.sh
+            cd "'"$WORK_IN_CONTAINER"'"
+            LLVM=$(brew --prefix llvm@21)
+            ICU=$(brew --prefix icu4c@78)
+            CROSS=build/ohos-cross-libs
+            # Cross-libs must exist (cache hit or just-built).
+            test -f "$CROSS/libcxx/include/v1/__config_site" || { echo "ERROR: cross-libs headers missing"; exit 1; }
+            test -f "$CROSS/libcxx/lib/libc++.a" || { echo "ERROR: libc++.a missing"; exit 1; }
+            grep -q "define _LIBCPP_ABI_NAMESPACE __n1" "$CROSS/libcxx/include/v1/__config_site" || { echo "ERROR: headers not __n1"; exit 1; }
+            echo "=== cross-libs OK (ABI __n1) ==="
             mkdir -p build/ohos-icu/target/include build/ohos-icu/target/lib build/ohos-icu/host/bin
             ln -sf "$ICU/include/unicode" build/ohos-icu/target/include/unicode
             for a in libicudata.a libicui18n.a libicuuc.a; do
@@ -340,8 +441,7 @@ jobs:
             for t in genrb genccode gencmn pkgdata; do
               [ -x "$ICU/bin/$t" ] && ln -sf "$ICU/bin/$t" "build/ohos-icu/host/bin/$t" || true
             done
-            echo "=== scaffold tree ==="
-            ls -la build/ohos-cross-libs/libcxx/include/ build/ohos-icu/target/lib/
+            echo "=== ICU scaffold done ==="
           '
 
       # bun install: --ignore-scripts because esbuild 0.21.5's postinstall
