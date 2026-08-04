@@ -255,7 +255,21 @@ jobs:
         id: webkit-cache
         with:
           path: build/release-ohos/deps/WebKit
-          key: webkit-ohos-github-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}
+          # ABI marker in the key: when the libc++ ABI namespace changes
+          # (__h -> __n1 etc.), the cache MUST NOT restore .o files compiled
+          # against the old ABI — they mangle to the wrong namespace and
+          # break the link with undefined-symbol errors mixing __h and __n1.
+          key: webkit-ohos-github-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}-abi-n1
+
+      - name: Purge stale WebKit + cross-libs build dir
+        # actions/checkout does NOT clean build artifacts; a previous run on
+        # this runner may have left .o files compiled against the old __h
+        # libc++ ABI. ninja incremental would reuse them, mixing __h and __n1
+        # symbols at link time. Wipe deps/WebKit and ohos-cross-libs so the
+        # scaffold + configure-WebKit below rebuilds every .o against the
+        # current __n1 headers. Cheap relative to a full WebKit compile and
+        # avoids the ABI-mismatch link failure.
+        run: rm -rf build/release-ohos/deps/WebKit build/ohos-cross-libs
 
       - name: Scaffold OHOS cross-libs + ICU
         run: |
@@ -264,17 +278,60 @@ jobs:
             . /etc/profile.d/brew.sh
             cd "'"$WORK_IN_CONTAINER"'"
             LLVM=$(brew --prefix llvm@21)
+            SDK=$(brew --prefix ohos-sdk)
             ICU=$(brew --prefix icu4c@78)
             CROSS=build/ohos-cross-libs
             mkdir -p "$CROSS/libcxx/include" "$CROSS/libcxxabi/include"
-            ln -sf "$LLVM/include/aarch64-linux-ohos/c++/v1" "$CROSS/libcxx/include/v1"
-            ln -sf "$LLVM/include/aarch64-linux-ohos/c++/v1" "$CROSS/libcxxabi/include"
+            # OHOS libc++ ABI: device libc++.so / libv8_shared.so export
+            # std::__n1::* (OHOS sets _LIBCPP_ABI_NAMESPACE=__n1). llvm@21
+            # aarch64-linux-ohos c++/v1 headers define __h. Two constraints:
+            #   1. headers must be the full llvm@21 tree (1680 files, C++23:
+            #      <expected>, <print>, <mdspan>) — the OHOS SDK libcxx-ohos
+            #      tree is an old LLVM-15 freeze (792 files, no <expected>)
+            #      and breaks the WebKit gnu++23 compile.
+            #   2. symbols must mangle as __n1 to match the device libc++.so.
+            # Solution: copy the llvm@21 header tree (constraint 1) and
+            # in-place rewrite ONLY the ABI namespace line in __config_site
+            # from __h to __n1 (constraint 2). Do NOT swap the whole
+            # __config_site — the OHOS one is an LLVM-15 freeze missing
+            # _LIBCPP_HARDENING_MODE_DEFAULT, which llvm@21 __config requires
+            # (breaks std::scoped_lock / std::this_thread / LockHolder). One
+            # sed line, everything else in __config_site stays llvm@21-native.
+            # The .a libs MUST be the OHOS SDK ones (__n1 symbols) — linking
+            # llvm@21 .a (__h) against __n1-compiled objects leaves
+            # std::__n1::mutex::lock etc. undefined. Headers llvm@21 (C++23
+            # surface is header-only, no .a needed) + libs OHOS (__n1 ABI).
+            # NOTE: no apostrophes below — single-quoted docker exec heredoc.
+            STD_LIBCXX="$LLVM/include/aarch64-linux-ohos/c++/v1"
+            OHOS_LIBCXX="$SDK/native/llvm/include/libcxx-ohos/include/c++/v1"
+            test -f "$STD_LIBCXX/__config_site" || { echo "ERROR: llvm@21 libcxx headers missing at $STD_LIBCXX"; exit 1; }
+            test -f "$OHOS_LIBCXX/__config_site" || { echo "ERROR: OHOS libcxx-ohos headers missing at $OHOS_LIBCXX"; exit 1; }
+            grep -q "define _LIBCPP_ABI_NAMESPACE __n1" "$OHOS_LIBCXX/__config_site" || { echo "ERROR: OHOS headers do not define __n1 ABI namespace"; exit 1; }
+            rm -rf "$CROSS/libcxx/include/v1"
+            cp -a "$STD_LIBCXX" "$CROSS/libcxx/include/v1"
+            # Rewrite the single ABI namespace line __h -> __n1 in place.
+            sed -i "s/^#define _LIBCPP_ABI_NAMESPACE __h/#define _LIBCPP_ABI_NAMESPACE __n1/" "$CROSS/libcxx/include/v1/__config_site"
+            grep -q "define _LIBCPP_ABI_NAMESPACE __n1" "$CROSS/libcxx/include/v1/__config_site" || { echo "ERROR: failed to rewrite ABI namespace to __n1"; exit 1; }
+            # libcxxabi headers: llvm@21 ships them under the same c++/v1 tree
+            # (cxxabi.h, __cxxabi_config.h), so one include dir covers both.
+            ln -sfn "$CROSS/libcxx/include/v1" "$CROSS/libcxxabi/include"
+            # Static .a libs: use the OHOS SDK ones (symbols mangle __n1,
+            # matching the headers). llvm@21 .a are __h — linking them
+            # against __n1-compiled objects leaves std::__n1::mutex::lock()
+            # etc. undefined (the link fails inside WebKit JSC). The OHOS .a
+            # are LLVM-15-built but implement the same stable libc++ ABI the
+            # headers declare (mutex/condition_variable/string/sort/once) —
+            # the C++23 surface (<expected>, <print>) is header-only, no .a
+            # symbol needed. OHOS libc++.a is thin (most of libc++ is
+            # header-inline); libc++abi.a carries the bulk of __n1 symbols.
             for d in libcxx libcxxabi libunwind; do
               mkdir -p "$CROSS/$d/lib"
-              for a in "$LLVM/lib/aarch64-linux-ohos"/*.a; do
-                ln -sf "$a" "$CROSS/$d/lib/$(basename "$a")"
+              for a in "$SDK/native/llvm/lib/aarch64-linux-ohos"/*.a; do
+                ln -sfn "$a" "$CROSS/$d/lib/$(basename "$a")"
               done
             done
+            echo "=== __config_site ABI marker (must be __n1) ==="
+            grep -nE "_LIBCPP_ABI_NAMESPACE|_LIBCPP_ABI_VERSION" "$CROSS/libcxx/include/v1/__config_site"
             mkdir -p build/ohos-icu/target/include build/ohos-icu/target/lib build/ohos-icu/host/bin
             ln -sf "$ICU/include/unicode" build/ohos-icu/target/include/unicode
             for a in libicudata.a libicui18n.a libicuuc.a; do
@@ -450,6 +507,28 @@ jobs:
             readelf -h "$OUT" 2>/dev/null | head -20
             echo "=== NEEDED libs ==="
             readelf -d "$OUT" 2>/dev/null | grep NEEDED || true
+            echo "=== C++ ABI namespace (must be __n1; __h/__1 fails on device) ==="
+            LLVM=$(brew --prefix llvm@21)
+            NM="$LLVM/bin/llvm-nm"
+            # Final binary first; if stripped (no symtab), fall back to .o
+            # files which always carry mangled symbols.
+            SYMS=$("$NM" "$OUT" 2>/dev/null)
+            if [ -z "$SYMS" ]; then
+              echo "(binary symbol table empty — checking object files instead)"
+              OBJ_DIR=$(find build/release-ohos -type d -name obj 2>/dev/null | head -1)
+              SYMS=$(find "$OBJ_DIR" -name "*.o" -print0 2>/dev/null | xargs -0 "$NM" 2>/dev/null)
+            fi
+            n1=$(printf "%s\n" "$SYMS" | grep -c "St4__n1")
+            bad=$(printf "%s\n" "$SYMS" | grep -cE "St3__h|St3__1")
+            echo "std::__n1 symbols: $n1  (want > 0)"
+            echo "std::__h/__1 symbols: $bad  (want 0)"
+            [ "$n1" -gt 0 ] && [ "$bad" -eq 0 ] || {
+              echo "ERROR: C++ ABI mismatch — __n1=$n1 __h/__1=$bad"
+              echo "Device libc++.so / libv8_shared.so export std::__n1::*; __h/__1 refs"
+              echo "cause symbol-not-found (e.g. v8::Array::New ... std::function) on device."
+              [ "$bad" -gt 0 ] && { echo "--- first offending symbols ---"; printf "%s\n" "$SYMS" | grep -E "St3__h|St3__1" | head -10; }
+              exit 1
+            }
             echo "=== validation OK (compile-only; signing + on-device run stay on 鸿蒙 PC) ==="
           '
 
