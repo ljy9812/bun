@@ -129,7 +129,8 @@ jobs:
           echo "RUSTUP_HOME=$RUST_HOME" >> $GITHUB_ENV
           echo "CARGO_HOME=$RUST_HOME/cargo" >> $GITHUB_ENV
           echo "$RUST_HOME/bin" >> $GITHUB_PATH
-          source "$RUST_HOME/env"
+          echo "$RUST_HOME/cargo/bin" >> $GITHUB_PATH
+          source "$RUST_HOME/cargo/env"
           rustc --version
           cargo --version
           rustup target list --installed
