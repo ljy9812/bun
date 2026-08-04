@@ -433,11 +433,17 @@ jobs:
           # --target=aarch64-linux-ohos). Harmless: precise crt specification.
           if [ -f build/release-ohos/deps/WebKit/build.ninja ]; then
             SYSROOT_LIB="$SYSROOT/usr/lib/aarch64-linux-ohos"
-            # Only patch LINK commands (those WITHOUT -c compile flag). sed
-            # matches lines containing --target=aarch64-linux-ohos but not " -c "
-            # (compile commands have -c, link commands dont).
-            sed -i "/--target=aarch64-linux-ohos/ { / -c /! s|--target=aarch64-linux-ohos|-nodefaultlibs -nostartfiles $SYSROOT_LIB/Scrt1.o $SYSROOT_LIB/crti.o $SYSROOT_LIB/crtn.o --target=aarch64-linux-ohos|; }" \
-              build/release-ohos/deps/WebKit/build.ninja
+            CRT_INJECT="-nodefaultlibs -nostartfiles $SYSROOT_LIB/Scrt1.o $SYSROOT_LIB/crti.o $SYSROOT_LIB/crtn.o"
+            # Only patch LINK commands (without -c compile flag). Use awk: if
+            # line has --target=aarch64-linux-ohos AND no " -c " (compile), inject
+            # crt flags before --target. sed nested address was unreliable.
+            awk -v inj="$CRT_INJECT" '
+              /--target=aarch64-linux-ohos/ && !/ -c / {
+                sub(/--target=aarch64-linux-ohos/, inj " --target=aarch64-linux-ohos")
+              }
+              { print }
+            ' build/release-ohos/deps/WebKit/build.ninja > build/release-ohos/deps/WebKit/build.ninja.tmp
+            mv build/release-ohos/deps/WebKit/build.ninja.tmp build/release-ohos/deps/WebKit/build.ninja
             echo "patched WebKit link with -nodefaultlibs + musl crt ($(grep -c nodefaultlibs build/release-ohos/deps/WebKit/build.ninja) links)"
           fi
 
