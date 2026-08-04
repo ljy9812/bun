@@ -421,32 +421,6 @@ jobs:
             sed -i "s/-lpthreads/-lpthread/g" build/release-ohos/deps/WebKit/build.ninja
           fi
 
-          # Patch #5: WebKit link commands need -nodefaultlibs -nostartfiles
-          # + explicit musl crt. Official llvm-22 has no aarch64-linux-ohos
-          # compiler-rt (libclang_rt.builtins.a) and OHOS musl sysroot has no
-          # GCC crt (crtbeginS.o). clang --target=aarch64-linux-ohos auto-adds
-          # both, failing WebKit link (LLIntSettingsExtractor etc). The
-          # CMAKE_EXE_LINKER_FLAGS from webkit.ts adds -lc++ -lunwind but not
-          # -nodefaultlibs, so clang still auto-discovers crt/compiler-rt.
-          # Inject -nodefaultlibs -nostartfiles + explicit Scrt1.o/crti.o/
-          # crtn.o + -lc into every WebKit link command (identified by
-          # --target=aarch64-linux-ohos). Harmless: precise crt specification.
-          if [ -f build/release-ohos/deps/WebKit/build.ninja ]; then
-            SYSROOT_LIB="$SYSROOT/usr/lib/aarch64-linux-ohos"
-            CRT_INJECT="-nodefaultlibs -nostartfiles $SYSROOT_LIB/Scrt1.o $SYSROOT_LIB/crti.o $SYSROOT_LIB/crtn.o"
-            # Only patch LINK commands (without -c compile flag). Use awk: if
-            # line has --target=aarch64-linux-ohos AND no " -c " (compile), inject
-            # crt flags before --target. sed nested address was unreliable.
-            awk -v inj="$CRT_INJECT" '
-              /--target=aarch64-linux-ohos/ && !/ -c / {
-                sub(/--target=aarch64-linux-ohos/, inj " --target=aarch64-linux-ohos")
-              }
-              { print }
-            ' build/release-ohos/deps/WebKit/build.ninja > build/release-ohos/deps/WebKit/build.ninja.tmp
-            mv build/release-ohos/deps/WebKit/build.ninja.tmp build/release-ohos/deps/WebKit/build.ninja
-            echo "patched WebKit link with -nodefaultlibs + musl crt ($(grep -c nodefaultlibs build/release-ohos/deps/WebKit/build.ninja) links)"
-          fi
-
           # Patch #1: dep_host_cc -> /usr/bin/clang (LLVM 22 cant find GCC runtime)
           if grep -q "llvm-22/bin/clang \$flags -o \$out \$in" build/release-ohos/build.ninja 2>/dev/null; then
             sed -i 's|command = .*/llvm-22/bin/clang $flags -o $out $in|command = /usr/bin/clang $flags -o $out $in|' \

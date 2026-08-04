@@ -475,8 +475,16 @@ export const webkit: Dependency = {
           "-mbranch-protection=none", "-mno-outline-atomics",
           icuInclude,
         ].filter(Boolean).join(" ");
-        args.CMAKE_EXE_LINKER_FLAGS = `-L${ohosCrossLibs}/libcxx/lib -L${ohosCrossLibs}/libcxxabi/lib -L${ohosCrossLibs}/libunwind/lib -lc++ -lc++abi -lunwind`;
-        args.CMAKE_SHARED_LINKER_FLAGS = `-L${ohosCrossLibs}/libcxx/lib -L${ohosCrossLibs}/libcxxabi/lib -L${ohosCrossLibs}/libunwind/lib -lc++ -lc++abi -lunwind`;
+        // -nodefaultlibs -nostartfiles: official llvm-22 (and brew llvm@21 bottle)
+        // have no aarch64-linux-ohos compiler-rt (libclang_rt.builtins.a) and
+        // the OHOS musl sysroot has no GCC crt (crtbeginS.o/crtendS.o). clang
+        // --target=aarch64-linux-ohos auto-adds both, failing the link. Pass
+        // explicit musl crt + libs to bypass clang auto-discovery. Deterministic
+        // (precise crt spec) — harmless on self-hosted (same musl crt).
+        const ohosSysrootLib = `${cfg.ohosSysroot}/usr/lib/aarch64-linux-ohos`;
+        const ohosLinkFlags = `-nodefaultlibs -nostartfiles ${ohosSysrootLib}/Scrt1.o ${ohosSysrootLib}/crti.o ${ohosSysrootLib}/crtn.o -L${ohosCrossLibs}/libcxx/lib -L${ohosCrossLibs}/libcxxabi/lib -L${ohosCrossLibs}/libunwind/lib -L${ohosSysrootLib} -lc++ -lc++abi -lunwind -lc`;
+        args.CMAKE_EXE_LINKER_FLAGS = ohosLinkFlags;
+        args.CMAKE_SHARED_LINKER_FLAGS = ohosLinkFlags;
       }
       if (ohosIcuDir) {
         // hostBin is sibling of ohosIcuDir's parent: ohosIcuDir="<prefix>/target" → hostBin="<prefix>/host/bin"
