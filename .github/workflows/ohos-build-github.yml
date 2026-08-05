@@ -570,16 +570,20 @@ jobs:
             OBJ_DIR=$(find build/release-ohos -type d -name obj 2>/dev/null | head -1)
             SYMS=$(find "$OBJ_DIR" -name "*.o" -print0 2>/dev/null | xargs -0 "$NM" 2>/dev/null)
           fi
-          n1=$(printf "%s\n" "$SYMS" | grep -c "St4__n1")
-          bad=$(printf "%s\n" "$SYMS" | grep -cE "St3__h|St3__1")
+          n1=$(printf "%s\n" "$SYMS" | grep -c "St4__n1" || true)
+          bad=$(printf "%s\n" "$SYMS" | grep -cE "St3__h|St3__1" || true)
           echo "std::__n1 symbols: $n1  (want > 0)"
           echo "std::__h/__1 symbols: $bad  (want 0)"
-          [ "$n1" -gt 0 ] && [ "$bad" -eq 0 ] || {
+          if [ "$n1" -gt 0 ] && [ "$bad" -eq 0 ]; then
+            echo "=== validation OK ==="
+          else
             echo "ERROR: C++ ABI mismatch — __n1=$n1 __h/__1=$bad"
-            [ "$bad" -gt 0 ] && { echo "--- first offending symbols ---"; printf "%s\n" "$SYMS" | grep -E "St3__h|St3__1" | head -10; }
+            if [ "$bad" -gt 0 ]; then
+              echo "--- first offending symbols ---"
+              printf "%s\n" "$SYMS" | grep -E "St3__h|St3__1" | head -10
+            fi
             exit 1
-          }
-          echo "=== validation OK ==="
+          fi
 
       - name: Upload binary
         if: success()
