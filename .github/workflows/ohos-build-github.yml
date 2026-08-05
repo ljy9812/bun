@@ -298,6 +298,53 @@ jobs:
             echo "$a: __n1=$n1 __h=$hh"
           done
 
+          # Stage 3: compiler-rt builtins for aarch64-linux-ohos.
+          # Official llvm-22 has no OHOS compiler-rt (libclang_rt.builtins.a).
+          # WebKit/bun link needs __divti3/__fixdfti/etc (128-bit int ops).
+          # Build from same runtimes/ source, install to clang resource dir so
+          # clang --target=aarch64-linux-ohos finds it automatically.
+          echo "=== Stage 3: compiler-rt builtins (aarch64-linux-ohos) ==="
+          BUILD3=/tmp/compilerrt-build
+          rm -rf "$BUILD3" && mkdir -p "$BUILD3"
+          cmake -S "$RT" -B "$BUILD3" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
+            -DCMAKE_C_COMPILER="$LLVM/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" \
+            -DCMAKE_AR="$LLVM/bin/llvm-ar" \
+            -DCMAKE_RANLIB="$LLVM/bin/llvm-ranlib" \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+            -DCMAKE_C_FLAGS="$CFLAGS" \
+            -DCMAKE_CXX_FLAGS="$CFLAGS" \
+            -DCOMPILER_RT_BUILD_BUILTINS=ON \
+            -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+            -DCOMPILER_RT_BUILD_XRAY=OFF \
+            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+            -DCOMPILER_RT_BUILD_PROFILE=OFF \
+            -DCOMPILER_RT_BUILD_MEMPROF=OFF \
+            -DCOMPILER_RT_BUILD_ORC=OFF \
+            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+            -DCMAKE_INSTALL_PREFIX="$LLVM"
+          ninja -C "$BUILD3" builtins
+          ninja -C "$BUILD3" install
+          # Verify libclang_rt.builtins.a landed in clang resource dir
+          RESOURCE_LIB="$LLVM/lib/clang/${LLVM_VERSION%%.*}/lib/aarch64-linux-ohos"
+          echo "=== compiler-rt resource dir: $RESOURCE_LIB ==="
+          ls -lh "$RESOURCE_LIB/libclang_rt.builtins.a" 2>/dev/null || {
+            # cmake may install elsewhere; find and copy
+            RT_LIB=$(find "$BUILD3" -name "libclang_rt.builtins.a" | head -1)
+            if [ -n "$RT_LIB" ]; then
+              mkdir -p "$RESOURCE_LIB"
+              cp "$RT_LIB" "$RESOURCE_LIB/"
+              echo "copied $RT_LIB -> $RESOURCE_LIB/"
+            else
+              echo "WARNING: libclang_rt.builtins.a not found"
+            fi
+          }
+          echo "=== libcxx + compiler-rt self-compile done ==="
+
       - name: Cache cross-compiled ICU 78
         id: icu-cache
         uses: actions/cache@v4
