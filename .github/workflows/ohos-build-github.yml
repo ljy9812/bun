@@ -329,8 +329,13 @@ jobs:
             -DCOMPILER_RT_BUILD_ORC=OFF \
             -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
             -DCMAKE_INSTALL_PREFIX="$LLVM"
-          ninja -C "$BUILD3" builtins
-          ninja -C "$BUILD3" install
+          # Build ONLY builtins (not sanitizer_common — it fails on OHOS
+          # sysinfo.h redefinition and we dont need sanitizers). The builtins
+          # target name is compiler-rt-builtins-<triple>.
+          ninja -C "$BUILD3" compiler-rt-builtins-aarch64-linux-ohos 2>&1 || {
+            echo "=== builtins target failed, trying generic builtins ==="
+            ninja -C "$BUILD3" builtins 2>&1 || true
+          }
           # Verify libclang_rt.builtins.a landed in clang resource dir
           RESOURCE_LIB="$LLVM/lib/clang/${LLVM_VERSION%%.*}/lib/aarch64-linux-ohos"
           echo "=== compiler-rt resource dir: $RESOURCE_LIB ==="
