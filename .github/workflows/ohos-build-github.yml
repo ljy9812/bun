@@ -425,8 +425,11 @@ jobs:
 
           # Install into layout flags.ts expects (from build dir, skip make install)
           mkdir -p "$ICU_TARGET_DIR/include" "$ICU_TARGET_DIR/lib" "$ICU_HOST_DIR/bin"
-          cp -a "$ICU_TARGET/include/unicode" "$ICU_TARGET_DIR/include/unicode" 2>/dev/null || \
-            cp -a "$ICU_SRC/source/common/unicode" "$ICU_TARGET_DIR/include/unicode"
+          # Copy ICU headers: source/common/unicode has the full set (ucsdet.h
+          # etc), build dir only has generated ones. Use source + overlay build.
+          cp -a "$ICU_SRC/source/common/unicode" "$ICU_TARGET_DIR/include/unicode"
+          cp -a "$ICU_TARGET/include/unicode/"* "$ICU_TARGET_DIR/include/unicode/" 2>/dev/null || true
+          cp -a "$ICU_SRC/source/i18n/unicode/"* "$ICU_TARGET_DIR/include/unicode/" 2>/dev/null || true
           for a in libicudata.a libicui18n.a libicuuc.a; do
             cp "$ICU_TARGET/lib/$a" "$ICU_TARGET_DIR/lib/" 2>/dev/null || true
           done
