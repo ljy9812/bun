@@ -338,18 +338,19 @@ jobs:
           }
           # Verify libclang_rt.builtins.a landed in clang resource dir
           RESOURCE_LIB="$LLVM/lib/clang/${LLVM_VERSION%%.*}/lib/aarch64-linux-ohos"
-          echo "=== compiler-rt resource dir: $RESOURCE_LIB ==="
-          ls -lh "$RESOURCE_LIB/libclang_rt.builtins.a" 2>/dev/null || {
-            # cmake may install elsewhere; find and copy
-            RT_LIB=$(find "$BUILD3" -name "libclang_rt.builtins.a" | head -1)
-            if [ -n "$RT_LIB" ]; then
-              mkdir -p "$RESOURCE_LIB"
-              cp "$RT_LIB" "$RESOURCE_LIB/"
-              echo "copied $RT_LIB -> $RESOURCE_LIB/"
-            else
-              echo "WARNING: libclang_rt.builtins.a not found"
-            fi
-          }
+          mkdir -p "$RESOURCE_LIB"
+          # compiler-rt produces libclang_rt.builtins-aarch64.a (with arch
+          # suffix). clang looks for libclang_rt.builtins.a (no suffix). Find
+          # the builtins archive and copy + rename to the expected name.
+          RT_LIB=$(find "$BUILD3" -name "libclang_rt.builtins-aarch64.a" -o -name "libclang_rt.builtins.a" | head -1)
+          if [ -n "$RT_LIB" ]; then
+            cp "$RT_LIB" "$RESOURCE_LIB/libclang_rt.builtins.a"
+            echo "copied $RT_LIB -> $RESOURCE_LIB/libclang_rt.builtins.a"
+            "$LLVM/bin/llvm-nm" "$RESOURCE_LIB/libclang_rt.builtins.a" 2>/dev/null | grep -c "__divti3" && echo "(has __divti3)"
+          else
+            echo "WARNING: libclang_rt.builtins not found"
+            find "$BUILD3" -name "libclang_rt*" | head -10
+          fi
           echo "=== libcxx + compiler-rt self-compile done ==="
 
       - name: Cache cross-compiled ICU 78
