@@ -311,6 +311,8 @@ jobs:
             -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
             -DCMAKE_C_COMPILER="$LLVM/bin/clang" \
             -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" \
+            -DCMAKE_C_COMPILER_TARGET="aarch64-linux-ohos" \
+            -DCMAKE_CXX_COMPILER_TARGET="aarch64-linux-ohos" \
             -DCMAKE_AR="$LLVM/bin/llvm-ar" \
             -DCMAKE_RANLIB="$LLVM/bin/llvm-ranlib" \
             -DCMAKE_SYSTEM_NAME=Linux \
