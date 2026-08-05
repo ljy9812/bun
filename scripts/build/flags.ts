@@ -1203,9 +1203,18 @@ export const linkerFlags: Flag[] = [
   },
   {
     flag: c => [
+      // -nostartfiles: OHOS musl sysroot has no GCC crt (crtbeginS.o/
+      // crtendS.o). clang auto-adds them, failing bun link. -nostartfiles
+      // skips crt begin/end (keeps compiler-rt + libc). Explicit musl crt.
+      // NOT -nodefaultlibs (would drop compiler-rt — see webkit.ts).
+      "-nostartfiles",
+      `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/Scrt1.o`,
+      `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/crti.o`,
+      `${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos/crtn.o`,
       `-L${c.ohosCrossLibs!}/libcxx/lib`,
       `-L${c.ohosCrossLibs!}/libcxxabi/lib`,
       `-L${c.ohosCrossLibs!}/libunwind/lib`,
+      `-L${c.ohosSysroot!}/usr/lib/aarch64-linux-ohos`,
       c.ohosIcuDir ? `-L${c.ohosIcuDir}/lib` : "",
       "-lc++",
       "-lc++abi",
@@ -1213,7 +1222,7 @@ export const linkerFlags: Flag[] = [
       "-lc",
     ].filter(f => f !== ""),
     when: c => c.ohos,
-    desc: "OHOS: link LLVM 22 libc++ + libc++abi + libunwind + dynamic libc",
+    desc: "OHOS: link __n1 libc++ + libc++abi + libunwind + musl crt (-nostartfiles)",
   },
   {
     flag: [
