@@ -188,7 +188,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/ohos-cross-libs
-          key: ohos-libcxx-n1-llvm${{ env.LLVM_VERSION }}
+          key: ohos-libcxx-n1-llvm${{ env.LLVM_VERSION }}-rt2
 
       - name: Self-compile __n1 libcxx + libcxxabi + libunwind
         if: steps.libcxx-cache.outputs.cache-hit != 'true'
@@ -410,7 +410,7 @@ jobs:
             --host=aarch64-linux-ohos \
             --prefix=/tmp/icu-target-install \
             --disable-shared --enable-static \
-            --with-cross-build=/tmp/icu-host-install \
+            --with-cross-build="$ICU_HOST" \
             CC="$LLVM/bin/clang" CXX="$LLVM/bin/clang++" \
             AR="$LLVM/bin/llvm-ar" RANLIB="$LLVM/bin/llvm-ranlib" STRIP="$LLVM/bin/llvm-strip" \
             CFLAGS="$TARGET_CFLAGS" CXXFLAGS="$TARGET_CXXFLAGS" \
@@ -432,7 +432,8 @@ jobs:
           done
           cp "$ICU_TARGET/stubdata/libicudata.a" "$ICU_TARGET_DIR/lib/" 2>/dev/null || true
           for t in genrb genccode gencmn pkgdata; do
-            cp /tmp/icu-host-install/bin/$t "$ICU_HOST_DIR/bin/" 2>/dev/null || true
+            cp /tmp/icu-host-install/bin/$t "$ICU_HOST_DIR/bin/" 2>/dev/null || \
+              cp "$ICU_HOST/bin/$t" "$ICU_HOST_DIR/bin/" 2>/dev/null || true
           done
           echo "=== ICU target libs ==="
           ls -lh "$ICU_TARGET_DIR/lib/"
