@@ -596,7 +596,6 @@ jobs:
       - name: Prepare github-hosted release asset
         if: success()
         id: gh_release
-        working-directory: bun
         run: |
           BIN=build/release-ohos/bun
           [ -f "$BIN" ] || BIN=build/release-ohos/bun-profile
