@@ -593,6 +593,41 @@ jobs:
           path: build/release-ohos/bun
           retention-days: 90
 
+      - name: Prepare github-hosted release asset
+        if: success()
+        id: gh_release
+        working-directory: bun
+        run: |
+          BIN=build/release-ohos/bun
+          [ -f "$BIN" ] || BIN=build/release-ohos/bun-profile
+          test -f "$BIN" || { echo "FATAL: no bun binary to release"; exit 1; }
+          VERSION=$("$BIN" --version 2>/dev/null || python3 -c "import json; print(json.load(open('package.json'))['version'])")
+          COMMIT=$(git rev-parse --short HEAD)
+          # Suffix -github so it coexists with the self-hosted build's
+          # `bun-ohos-aarch64` asset on the same ohos-latest release tag.
+          # Both curl-installable, distinguishable by filename.
+          cp "$BIN" /tmp/bun-ohos-aarch64-github
+          echo "asset_path=/tmp/bun-ohos-aarch64-github" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "✅ Release asset: bun-ohos-aarch64-github (v$VERSION @ $COMMIT)"
+
+      # Publish to the same ohos-latest release as the self-hosted build so
+      # both are curl-installable from one tag. Asset name differs
+      # (bun-ohos-aarch64-github vs bun-ohos-aarch64), so neither overwrites
+      # the other. No `body`/`name` set → softprops only uploads the asset,
+      # leaving the release description (owned by ohos-release.yml) intact.
+      # Trigger guard is intentionally broad (success()); narrow later to a
+      # specific branch if per-push publishing is too noisy.
+      - name: Upload github-hosted binary to ohos-latest release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ohos-latest
+          files: ${{ steps.gh_release.outputs.asset_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Dump failure diagnostics
         if: failure()
         run: |
