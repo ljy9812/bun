@@ -40,6 +40,12 @@ concurrency:
   group: ohos-build-github-${{ github.ref }}
   cancel-in-progress: true
 
+# contents: write required for softprops/action-gh-release to upload assets
+# to the ohos-latest release. Repo default is read-only (failed with
+# "Resource not accessible by integration" on update-a-release).
+permissions:
+  contents: write
+
 env:
   LLVM_VERSION: "22.1.7"
   LLVM_URL: "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.7/LLVM-22.1.7-Linux-ARM64.tar.xz"
