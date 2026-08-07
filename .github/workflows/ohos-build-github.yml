@@ -87,16 +87,22 @@ jobs:
           # brew trust social4hyq tap
           docker exec "$CONTAINER" bash -lc "brew tap $TAP" || true
 
-      # ── brew install toolchain deps ──────────────────────────────
-      # Install social4hyq bottles (prebuilt, not --build-bottle).
-      # bun-webkit NOT installed here — we use --webkit=local (our fork).
-      - name: brew install toolchain deps
+      # ── Verify toolchain (preinstalled in ci-runner image) ───────
+      # The ci-runner image already has Harmonybrew core bottles installed
+      # (llvm@21, ohos-sdk, icu4c@78, rust-nightly, bun-bootstrap, etc).
+      # We only verify they exist — no brew install needed.
+      - name: Verify container toolchain
         run: |
-          docker exec "$CONTAINER" bash -lc \
-            "$BREW_ENV brew install --force-bottle \
-              $TAP/llvm@21 $TAP/ohos-sdk $TAP/icu4c@78 \
-              $TAP/bun-bootstrap $TAP/rust-nightly \
-              cmake ninja gperf perl python@3.14 ruby openssl@3"
+          docker exec "$CONTAINER" bash -lc '
+            echo "=== brew list (key deps) ==="
+            brew list --versions llvm@21 ohos-sdk icu4c@78 rust-nightly bun-bootstrap cmake ninja 2>&1
+            echo "=== clang ==="
+            $(brew --prefix llvm@21)/bin/clang --version | head -1
+            echo "=== rustc ==="
+            $(brew --prefix rust-nightly)/bin/rustc --version
+            echo "=== bun ==="
+            $(brew --prefix bun-bootstrap)/bin/bun --version
+          '
 
       # ── WebKit fork (pinned, --webkit=local) ─────────────────────
       - name: Checkout WebKit fork (pinned)
