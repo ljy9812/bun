@@ -1,28 +1,22 @@
-# OHOS Bun build on a bare GitHub-hosted ARM runner (no container, no brew).
+# OHOS Bun build on a GitHub-hosted ARM runner using the social4hyq OHOS
+# container (Harmonybrew musl userspace). The container provides the full
+# OHOS toolchain (llvm@21, ohos-sdk, icu4c@78, rust-nightly, bun-webkit
+# bottles) via brew — no self-compiled __n1 cross-libs needed.
 #
-# Decoupled from social4hyq ci-runner container + Harmonybrew bottles. Runs
-# directly on ubuntu-24.04-arm, mirroring the self-hosted ohos-build-rust.yml
-# approach: glibc Rust host (aarch64-unknown-linux-gnu) + -Zbuild-std cross-
-# compile to aarch64-unknown-linux-ohos target. The container was only needed
-# to run the musl OHOS Rust host toolchain — self-hosted proves the glibc host
-# + cross-compile path works (it never used the OHOS host tarball).
+# Container approach (not GHA `container:` field): the image is a musl
+# userspace that doesn't support the glibc node runner GHA requires, so we
+# `docker run -d` + `docker exec` (same as social4hyq/homebrew-core).
 #
-# Toolchain:
-#   - LLVM 22.1.7 official tarball (full static libs + cmake config, NOT the
-#     brew bottle which strips them → find_package(LLVM) FATAL_ERROR)
-#   - OHOS SDK sysroot + libcxx-ohos headers from our own release asset
-#     (developer.huawei.com needs login; mirrored to ljy9812/bun releases)
-#   - Rust nightly gnu host + rust-src + aarch64-unknown-linux-ohos target
-#   - Self-compiled __n1 libcxx/libcxxabi/libunwind (device libc++.so is __n1;
-#     all prebuilt .a are __h → must build from LLVM source with __n1 ABI)
-#   - ICU 78 cross-compiled from source (apt libicu-dev is glibc, wrong target)
+# --webkit=local: we pin our own WebKit fork (not social4hyq bottle) to
+# avoid bottle drift (2026-08-03 incident). The container's llvm@21 libcxx
+# (__1 ABI) compiles WebKit → __1 WebKit → matches __1 bun.
 #
-# V8 ABI fix: the device libc++_shared.so / libv8_shared.so export std::__n1::*
-# The self-compiled libcxx uses -DLIBCXX_ABI_NAMESPACE=__n1, so bun C++ symbols
-# mangle __n1 and match the device. Verify-binary asserts St4__n1 > 0 and
-# St3__h|St3__1 == 0.
+# ABI: container cross-libs are __1 (same as self-hosted Harmonybrew).
+# After commit 6269b7c0 (deleted napi_body.rs __n1 branch), C++ __1 + Rust
+# __1 (OHOS mod empty, no v8::Array::New reference) → internally consistent
+# → runs on device (v8 not exported, device doesn't resolve ABI).
 
-name: OHOS Build (GitHub-hosted)
+name: OHOS Build (GitHub-hosted, social4hyq container)
 
 on:
   push:
@@ -40,27 +34,25 @@ concurrency:
   group: ohos-build-github-${{ github.ref }}
   cancel-in-progress: true
 
-# contents: write required for softprops/action-gh-release to upload assets
-# to the ohos-latest release. Repo default is read-only (failed with
-# "Resource not accessible by integration" on update-a-release).
 permissions:
   contents: write
 
 env:
-  LLVM_VERSION: "22.1.7"
-  LLVM_URL: "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.7/LLVM-22.1.7-Linux-ARM64.tar.xz"
-  LLVM_SRC_URL: "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.7/llvm-project-22.1.7.src.tar.xz"
-  OHOS_SDK_TARBALL: "ohos-sdk-sysroot-aarch64-api20-6.0.0.47.tar.gz"
-  OHOS_SDK_RELEASE: "ohos-build-deps-v6.0.0.47"
-  RUST_VER: "nightly-2026-07-20"
+  # social4hyq ci-runner image (GHCR mirror of Harmonybrew SWR image).
+  # TODO: digest-pin via vars.OHOS_CI_IMAGE for reproducibility (see
+  # social4hyq sync-ci-image.yml). Using :latest for initial bring-up.
+  OHOS_CI_IMAGE: ghcr.io/social4hyq/ci-runner:latest
+  CONTAINER: ohos
+  TAP: social4hyq/core
+  BREW_ENV: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
   WEBKIT_FORK: springmin/WebKit
   WEBKIT_REF: c9296e353e365ecf0de82f273bb0a88a3df465be
+  RUST_TOOLCHAIN: nightly-2026-07-20
   NINJA_JOBS: 2
-  ICU_URL: "https://github.com/unicode-org/icu/releases/download/release-78.3/icu4c-78.3-sources.tgz"
 
 jobs:
   build:
-    name: Build Bun for OHOS (aarch64, bare runner)
+    name: Build Bun for OHOS (aarch64, social4hyq container)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
 
@@ -70,82 +62,43 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install system dependencies
+      # ── Start social4hyq OHOS container ──────────────────────────
+      # docker run (not GHA container:) — musl userspace incompatible
+      # with GHA's glibc node runner. seccomp=unconfined for io_uring.
+      - name: Pull and start OHOS container
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build gperf perl python3 ruby \
-            libssl-dev libxml2-dev zlib1g-dev \
-            ca-certificates curl wget git \
-            build-essential clang \
-            libncurses-dev
+          docker pull "$OHOS_CI_IMAGE"
+          docker run -d --name "$CONTAINER" --init \
+            --security-opt seccomp=unconfined \
+            -v "$GITHUB_WORKSPACE:/workspace/bun" \
+            "$OHOS_CI_IMAGE" sleep infinity
 
-      - name: Cache LLVM 22
-        id: llvm-cache
-        uses: actions/cache@v4
-        with:
-          path: /opt/llvm-22
-          key: llvm-${{ env.LLVM_VERSION }}-linux-arm64-official
-
-      - name: Download and extract LLVM 22
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
+      - name: Configure container (OHOS device paths + cargo + brew trust)
         run: |
-          sudo mkdir -p /opt/llvm-22
-          curl -fsSL "$LLVM_URL" -o /tmp/llvm.tar.xz
-          sudo tar xf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
-          rm /tmp/llvm.tar.xz
-          # Verify full static libs exist (brew bottle stripped these)
-          test -f /opt/llvm-22/lib/libLLVMDemangle.a || { echo "FATAL: libLLVMDemangle.a missing"; exit 1; }
-          /opt/llvm-22/bin/clang --version | head -1
-          echo "LLVM_PATH=/opt/llvm-22" >> $GITHUB_ENV
+          # OHOS device path simulation (binary-sign-tool needs /system/bin/sh etc.)
+          docker exec "$CONTAINER" bash -lc \
+            'mkdir -p /data/local/tmp /system/bin /system/lib && \
+             ln -sf /bin/sh /system/bin/sh && \
+             ln -sf /lib/ld-musl-aarch64.so.1 /system/lib/ld-musl-aarch64.so.1'
+          # cargo sparse registry + git-fetch-with-cli
+          docker exec "$CONTAINER" bash -lc \
+            'mkdir -p /root/.cargo && \
+             printf "[registries.crates-io]\nprotocol = \"sparse\"\n\n[net]\ngit-fetch-with-cli = true\nretry = 3\n" > /root/.cargo/config.toml'
+          # brew trust social4hyq tap
+          docker exec "$CONTAINER" bash -lc "brew tap $TAP" || true
 
-      - name: Set LLVM path (cache hit)
-        if: steps.llvm-cache.outputs.cache-hit == 'true'
-        run: echo "LLVM_PATH=/opt/llvm-22" >> $GITHUB_ENV
-
-      - name: Download and extract OHOS SDK
+      # ── brew install toolchain deps ──────────────────────────────
+      # Install social4hyq bottles (prebuilt, not --build-bottle).
+      # bun-webkit NOT installed here — we use --webkit=local (our fork).
+      - name: brew install toolchain deps
         run: |
-          mkdir -p $GITHUB_WORKSPACE/ohos-sdk
-          curl -fsSL \
-            "https://github.com/${{ github.repository }}/releases/download/${{ env.OHOS_SDK_RELEASE }}/${{ env.OHOS_SDK_TARBALL }}" \
-            -o /tmp/ohos-sdk.tar.gz
-          tar xf /tmp/ohos-sdk.tar.gz -C $GITHUB_WORKSPACE/ohos-sdk
-          rm /tmp/ohos-sdk.tar.gz
-          SYSROOT=$GITHUB_WORKSPACE/ohos-sdk/ohos/native/sysroot
-          LIBCXX_OHOS=$GITHUB_WORKSPACE/ohos-sdk/ohos/native/llvm/include/libcxx-ohos/include/c++/v1
-          test -d "$SYSROOT" || { echo "FATAL: sysroot missing"; exit 1; }
-          test -f "$LIBCXX_OHOS/__config_site" || { echo "FATAL: libcxx-ohos headers missing"; exit 1; }
-          grep -q "define _LIBCPP_ABI_NAMESPACE __n1" "$LIBCXX_OHOS/__config_site" || { echo "FATAL: headers not __n1"; exit 1; }
-          echo "OHOS SDK OK (ABI __n1)"
-          echo "OHOS_SDK_ROOT=$GITHUB_WORKSPACE/ohos-sdk" >> $GITHUB_ENV
-          echo "OHOS_SYSROOT=$SYSROOT" >> $GITHUB_ENV
+          docker exec "$CONTAINER" bash -lc \
+            "$BREW_ENV brew install --force-bottle \
+              $TAP/llvm@21 $TAP/ohos-sdk $TAP/icu4c@78 \
+              $TAP/bun-bootstrap $TAP/rust-nightly \
+              cmake ninja gperf perl python@3.14 ruby openssl@3"
 
-      - name: Install Rust nightly (gnu host + ohos cross-target)
-        run: |
-          RUST_HOME=$HOME/.rust
-          mkdir -p "$RUST_HOME"
-          export RUSTUP_HOME="$RUST_HOME"
-          export CARGO_HOME="$RUST_HOME/cargo"
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-            --default-toolchain "$RUST_VER" \
-            --profile minimal \
-            --component rust-src \
-            --target aarch64-unknown-linux-ohos
-          echo "RUST_HOME=$RUST_HOME" >> $GITHUB_ENV
-          echo "RUSTUP_HOME=$RUST_HOME" >> $GITHUB_ENV
-          echo "CARGO_HOME=$RUST_HOME/cargo" >> $GITHUB_ENV
-          echo "$RUST_HOME/bin" >> $GITHUB_PATH
-          echo "$RUST_HOME/cargo/bin" >> $GITHUB_PATH
-          source "$RUST_HOME/cargo/env"
-          rustc --version
-          cargo --version
-          rustup target list --installed
-
-      - name: Install bun
-        run: |
-          curl -fsSL https://bun.sh/install | bash
-          echo "$HOME/.bun/bin" >> $GITHUB_PATH
-
+      # ── WebKit fork (pinned, --webkit=local) ─────────────────────
       - name: Checkout WebKit fork (pinned)
         run: |
           WK_REF="${{ inputs.webkit_ref || env.WEBKIT_REF }}"
@@ -160,19 +113,6 @@ jobs:
           echo "=== vendor/WebKit HEAD ==="
           git rev-parse HEAD
 
-      - name: WebKit version sync check
-        run: |
-          WK_HASH=$(grep "^export const WEBKIT_VERSION" scripts/build/deps/webkit.ts | grep -oE '[a-f0-9]{40}')
-          echo "scripts/build/deps/webkit.ts pins: $WK_HASH"
-          if git -C vendor/WebKit cat-file -e "${WK_HASH}" 2>/dev/null; then
-            echo "vendor/WebKit contains ${WK_HASH}"
-          else
-            echo "vendor/WebKit missing ${WK_HASH} — fetching from upstream oven-sh/WebKit"
-            cd vendor/WebKit
-            git remote add upstream https://github.com/oven-sh/WebKit.git 2>/dev/null || true
-            git fetch upstream main --depth=200 2>/dev/null || echo "upstream fetch failed (network)"
-          fi
-
       - name: Extract WebKit version for cache key
         id: webkit-version
         run: |
@@ -184,414 +124,110 @@ jobs:
         id: webkit-cache
         with:
           path: build/release-ohos/deps/WebKit
-          key: webkit-ohos-github-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}-abi-n1
+          key: webkit-ohos-container-${{ inputs.webkit_ref || env.WEBKIT_REF }}-${{ steps.webkit-version.outputs.version }}-abi-1
 
-      - name: Purge stale cross-libs
-        run: rm -rf build/ohos-cross-libs
-
-      - name: Cache self-compiled __n1 libcxx
-        id: libcxx-cache
-        uses: actions/cache@v4
-        with:
-          path: build/ohos-cross-libs
-          key: ohos-libcxx-n1-llvm${{ env.LLVM_VERSION }}-rt2
-
-      - name: Self-compile __n1 libcxx + libcxxabi + libunwind
-        if: steps.libcxx-cache.outputs.cache-hit != 'true'
+      # ── bun install ──────────────────────────────────────────────
+      - name: bun install (root + node-fallbacks)
         run: |
-          set -e
-          LLVM=/opt/llvm-22
-          SDK=$OHOS_SDK_ROOT
-          SYSROOT=$OHOS_SYSROOT
-          CROSS=build/ohos-cross-libs
-          SRC=/tmp/llvm-project
-          RT=$SRC/runtimes
+          BUN=$(docker exec "$CONTAINER" bash -lc 'brew --prefix bun-bootstrap')/bin/bun
+          docker exec "$CONTAINER" bash -lc "cd /workspace/bun && BUN_INSTALL_IGNORE_SCRIPTS=1 $BUN install 2>&1 | tail -20"
+          docker exec "$CONTAINER" bash -lc "cd /workspace/bun/src/node-fallbacks && BUN_INSTALL_IGNORE_SCRIPTS=1 $BUN install 2>&1 | tail -20"
 
-          export PATH="$LLVM/bin:$PATH"
-
-          # Fetch LLVM 22 source (runtimes/ subdirectory)
-          if [ ! -d "$RT" ]; then
-            echo "=== downloading llvm-project-${LLVM_VERSION} source ==="
-            rm -rf "$SRC" /tmp/llvm-src.tar.xz
-            curl -fsSL -o /tmp/llvm-src.tar.xz "$LLVM_SRC_URL"
-            mkdir -p "$SRC"
-            tar xf /tmp/llvm-src.tar.xz -C "$SRC" --strip-components=1
-            rm -f /tmp/llvm-src.tar.xz
-          fi
-
-          # cflags mirror social4hyq llvm@21.rb build_multiarch_runtimes formula.
-          # NO --gcc-toolchain (caused cmake to find wrong llvm cmake config).
-          CFLAGS="--target=aarch64-linux-ohos --sysroot=$SYSROOT -D__MUSL__ -I$SYSROOT/usr/include -fPIC -fstack-protector-strong"
-          CXXFLAGS_UNWIND="$CFLAGS -nostdinc++"
-
-          # Stage 1: libunwind standalone
-          echo "=== Stage 1: libunwind ==="
-          BUILD1=/tmp/libcxx-build-unwind
-          rm -rf "$BUILD1" && mkdir -p "$BUILD1"
-          cmake -S "$RT" -B "$BUILD1" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_RUNTIMES="libunwind" \
-            -DCMAKE_C_COMPILER="$LLVM/bin/clang" \
-            -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" \
-            -DCMAKE_AR="$LLVM/bin/llvm-ar" \
-            -DCMAKE_RANLIB="$LLVM/bin/llvm-ranlib" \
-            -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-            -DCMAKE_C_FLAGS="$CFLAGS" \
-            -DCMAKE_CXX_FLAGS="$CXXFLAGS_UNWIND" \
-            -DLIBUNWIND_ENABLE_SHARED=OFF \
-            -DLIBUNWIND_USE_COMPILER_RT=ON
-          ninja -C "$BUILD1"
-
-          # Stage 2: libcxx + libcxxabi + libunwind combined, __n1 ABI
-          echo "=== Stage 2: libcxx + libcxxabi + libunwind (ABI __n1) ==="
-          BUILD2=/tmp/libcxx-build
-          rm -rf "$BUILD2" && mkdir -p "$BUILD2"
-          cmake -S "$RT" -B "$BUILD2" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
-            -DCMAKE_C_COMPILER="$LLVM/bin/clang" \
-            -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" \
-            -DCMAKE_AR="$LLVM/bin/llvm-ar" \
-            -DCMAKE_RANLIB="$LLVM/bin/llvm-ranlib" \
-            -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-            -DCMAKE_C_FLAGS="$CFLAGS" \
-            -DCMAKE_CXX_FLAGS="$CFLAGS" \
-            -DLIBCXX_ENABLE_SHARED=OFF \
-            -DLIBCXXABI_ENABLE_SHARED=OFF \
-            -DLIBUNWIND_ENABLE_SHARED=OFF \
-            -DLIBCXX_CXX_ABI=libcxxabi \
-            -DLIBCXX_ABI_NAMESPACE=__n1 \
-            -DLIBCXX_HAS_MUSL_LIBC=ON \
-            -DLIBCXX_HAS_PTHREAD_API=ON \
-            -DLIBCXXABI_USE_LLVM_UNWINDER=ON \
-            -DLIBCXXABI_ENABLE_STATIC_UNWINDER=ON \
-            -DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON \
-            -DLIBCXXABI_STATICALLY_LINK_UNWINDER_IN_STATIC_LIBRARY=OFF \
-            -DLIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF \
-            -DLIBCXX_USE_COMPILER_RT=ON \
-            -DLIBCXXABI_USE_COMPILER_RT=ON \
-            -DLIBUNWIND_USE_COMPILER_RT=ON
-          ninja -C "$BUILD2" cxx cxxabi unwind
-
-          # Install into cross-libs layout flags.ts expects
-          echo "=== install into $CROSS ==="
-          mkdir -p "$CROSS/libcxx/include" "$CROSS/libcxxabi/include" "$CROSS/libunwind/include"
-          mkdir -p "$CROSS/libcxx/lib" "$CROSS/libcxxabi/lib" "$CROSS/libunwind/lib"
-          cp -a "$BUILD2/include/c++/v1" "$CROSS/libcxx/include/v1" 2>/dev/null || \
-            cp -a "$LLVM/include/c++/v1" "$CROSS/libcxx/include/v1"
-          ln -sfn "$CROSS/libcxx/include/v1" "$CROSS/libcxxabi/include"
-          cp "$BUILD2/lib/aarch64-linux-ohos/libc++.a" "$CROSS/libcxx/lib/libc++.a" 2>/dev/null || \
-            cp "$BUILD2/lib/libc++.a" "$CROSS/libcxx/lib/libc++.a"
-          cp "$BUILD2/lib/aarch64-linux-ohos/libc++abi.a" "$CROSS/libcxxabi/lib/libc++abi.a" 2>/dev/null || \
-            cp "$BUILD2/lib/libc++abi.a" "$CROSS/libcxxabi/lib/libc++abi.a"
-          cp "$BUILD1/lib/aarch64-linux-ohos/libunwind.a" "$CROSS/libunwind/lib/libunwind.a" 2>/dev/null || \
-            cp "$BUILD1/lib/libunwind.a" "$CROSS/libunwind/lib/libunwind.a"
-
-          echo "=== __config_site ABI marker ==="
-          grep -nE "_LIBCPP_ABI_NAMESPACE|_LIBCPP_ABI_VERSION" "$CROSS/libcxx/include/v1/__config_site"
-          echo "=== .a symbol ABI check ==="
-          for a in libc++.a libc++abi.a; do
-            lib="$CROSS/libcxx/lib/$a"
-            [ -f "$CROSS/libcxxabi/lib/$a" ] && lib="$CROSS/libcxxabi/lib/$a"
-            # grep -c returns exit 1 on 0 matches — guard with || true
-            # (set -e would otherwise kill the step on a clean __n1-only lib).
-            n1=$("$LLVM/bin/llvm-nm" "$lib" 2>/dev/null | grep -c "St4__n1" || true)
-            hh=$("$LLVM/bin/llvm-nm" "$lib" 2>/dev/null | grep -c "St3__h" || true)
-            echo "$a: __n1=$n1 __h=$hh"
-          done
-
-          # Stage 3: compiler-rt builtins for aarch64-linux-ohos.
-          # Official llvm-22 has no OHOS compiler-rt (libclang_rt.builtins.a).
-          # WebKit/bun link needs __divti3/__fixdfti/etc (128-bit int ops).
-          # Build from same runtimes/ source, install to clang resource dir so
-          # clang --target=aarch64-linux-ohos finds it automatically.
-          echo "=== Stage 3: compiler-rt builtins (aarch64-linux-ohos) ==="
-          BUILD3=/tmp/compilerrt-build
-          rm -rf "$BUILD3" && mkdir -p "$BUILD3"
-          cmake -S "$RT" -B "$BUILD3" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
-            -DCMAKE_C_COMPILER="$LLVM/bin/clang" \
-            -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" \
-            -DCMAKE_C_COMPILER_TARGET="aarch64-linux-ohos" \
-            -DCMAKE_CXX_COMPILER_TARGET="aarch64-linux-ohos" \
-            -DCMAKE_AR="$LLVM/bin/llvm-ar" \
-            -DCMAKE_RANLIB="$LLVM/bin/llvm-ranlib" \
-            -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-            -DCMAKE_C_FLAGS="$CFLAGS" \
-            -DCMAKE_CXX_FLAGS="$CFLAGS" \
-            -DCOMPILER_RT_BUILD_BUILTINS=ON \
-            -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
-            -DCOMPILER_RT_BUILD_XRAY=OFF \
-            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
-            -DCOMPILER_RT_BUILD_PROFILE=OFF \
-            -DCOMPILER_RT_BUILD_MEMPROF=OFF \
-            -DCOMPILER_RT_BUILD_ORC=OFF \
-            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
-            -DCMAKE_INSTALL_PREFIX="$LLVM"
-          # Build ONLY builtins (not sanitizer_common — it fails on OHOS
-          # sysinfo.h redefinition and we dont need sanitizers). The builtins
-          # target name is compiler-rt-builtins-<triple>.
-          ninja -C "$BUILD3" compiler-rt-builtins-aarch64-linux-ohos 2>&1 || {
-            echo "=== builtins target failed, trying generic builtins ==="
-            ninja -C "$BUILD3" builtins 2>&1 || true
-          }
-          # Verify libclang_rt.builtins.a landed in clang resource dir
-          RESOURCE_LIB="$LLVM/lib/clang/${LLVM_VERSION%%.*}/lib/aarch64-linux-ohos"
-          mkdir -p "$RESOURCE_LIB"
-          # compiler-rt produces libclang_rt.builtins-aarch64.a (with arch
-          # suffix). clang looks for libclang_rt.builtins.a (no suffix). Find
-          # the builtins archive and copy + rename to the expected name.
-          RT_LIB=$(find "$BUILD3" -name "libclang_rt.builtins-aarch64.a" -o -name "libclang_rt.builtins.a" | head -1)
-          if [ -n "$RT_LIB" ]; then
-            cp "$RT_LIB" "$RESOURCE_LIB/libclang_rt.builtins.a"
-            echo "copied $RT_LIB -> $RESOURCE_LIB/libclang_rt.builtins.a"
-            "$LLVM/bin/llvm-nm" "$RESOURCE_LIB/libclang_rt.builtins.a" 2>/dev/null | grep -c "__divti3" && echo "(has __divti3)"
-          else
-            echo "WARNING: libclang_rt.builtins not found"
-            find "$BUILD3" -name "libclang_rt*" | head -10
-          fi
-          echo "=== libcxx + compiler-rt self-compile done ==="
-
-      - name: Cache cross-compiled ICU 78
-        id: icu-cache
-        uses: actions/cache@v4
-        with:
-          path: build/ohos-icu
-          key: ohos-icu-78-llvm${{ env.LLVM_VERSION }}
-
-      - name: Cross-compile ICU 78 for aarch64-linux-ohos (__n1 ABI)
-        if: steps.icu-cache.outputs.cache-hit != 'true'
-        run: |
-          set -e
-          LLVM=/opt/llvm-22
-          SYSROOT=$OHOS_SYSROOT
-          ICU_SRC=/tmp/icu-src
-          ICU_HOST=/tmp/icu-host-build
-          ICU_TARGET_DIR=$GITHUB_WORKSPACE/build/ohos-icu/target
-          ICU_HOST_DIR=$GITHUB_WORKSPACE/build/ohos-icu/host
-          export PATH="$LLVM/bin:$PATH"
-
-          # Download ICU 78 source
-          if [ ! -d "$ICU_SRC" ]; then
-            curl -fsSL -o /tmp/icu-src.tgz "$ICU_URL"
-            mkdir -p "$ICU_SRC"
-            tar xzf /tmp/icu-src.tgz -C "$ICU_SRC" --strip-components=1
-            rm /tmp/icu-src.tgz
-          fi
-
-          # Stage 1: ICU host tools (native linux-gnu for genrb/genccode/gencmn/pkgdata)
-          echo "=== Stage 1: ICU host tools ==="
-          rm -rf "$ICU_HOST" && mkdir -p "$ICU_HOST"
-          cd "$ICU_HOST"
-          "$ICU_SRC/source/runConfigureICU" Linux \
-            --disable-shared --enable-static \
-            --prefix=/tmp/icu-host-install
-          make -j$(nproc)
-          make install
-
-          # Stage 2: cross-compile ICU for aarch64-linux-ohos with __n1 ABI
-          # Now possible: compiler-rt (libclang_rt.builtins.a) self-compiled
-          # + -nostartfiles skips missing GCC crt. CXX uses __n1 cross-libs
-          # headers so ICU C++ symbols mangle __n1 (matching libcxx + device).
-          echo "=== Stage 2: ICU target (aarch64-linux-ohos, __n1) ==="
-          ICU_TARGET=/tmp/icu-target-build
-          rm -rf "$ICU_TARGET" && mkdir -p "$ICU_TARGET"
-          cd "$ICU_TARGET"
-          SYSROOT_LIB="$SYSROOT/usr/lib/aarch64-linux-ohos"
-          CROSS_LIBS=$GITHUB_WORKSPACE/build/ohos-cross-libs
-          TARGET_CFLAGS="--target=aarch64-linux-ohos --sysroot=$SYSROOT -D__MUSL__ -I$SYSROOT/usr/include -fPIC"
-          TARGET_CXXFLAGS="$TARGET_CFLAGS -nostdinc++ -I$CROSS_LIBS/libcxx/include/v1 -I$CROSS_LIBS/libcxxabi/include"
-          # -nostartfiles (not -nodefaultlibs): skip GCC crt begin/end
-          # (missing from OHOS musl sysroot) but keep compiler-rt + libc
-          # auto-add. Explicit Scrt1.o/crti.o/crtn.o (musl crt).
-          TARGET_LDFLAGS="-nostartfiles $SYSROOT_LIB/Scrt1.o $SYSROOT_LIB/crti.o $SYSROOT_LIB/crtn.o --target=aarch64-linux-ohos --sysroot=$SYSROOT -L$CROSS_LIBS/libunwind/lib -L$SYSROOT_LIB -lunwind -lc"
-          "$ICU_SRC/source/configure" \
-            --host=aarch64-linux-ohos \
-            --prefix=/tmp/icu-target-install \
-            --disable-shared --enable-static \
-            --with-cross-build="$ICU_HOST" \
-            CC="$LLVM/bin/clang" CXX="$LLVM/bin/clang++" \
-            AR="$LLVM/bin/llvm-ar" RANLIB="$LLVM/bin/llvm-ranlib" STRIP="$LLVM/bin/llvm-strip" \
-            CFLAGS="$TARGET_CFLAGS" CXXFLAGS="$TARGET_CXXFLAGS" \
-            LDFLAGS="$TARGET_LDFLAGS" \
-            --disable-layout --disable-layoutex \
-            --with-data-packaging=static || {
-              echo "=== ICU configure FAILED — config.log tail ==="
-              tail -60 /tmp/icu-target-build/config.log 2>/dev/null || echo "(no config.log)"
-              exit 1
-            }
-          make -j$(nproc) || true
-
-          # Install into layout flags.ts expects (from build dir, skip make install)
-          mkdir -p "$ICU_TARGET_DIR/include" "$ICU_TARGET_DIR/lib" "$ICU_HOST_DIR/bin"
-          # Copy ICU headers: source/common/unicode has the full set (ucsdet.h
-          # etc), build dir only has generated ones. Use source + overlay build.
-          cp -a "$ICU_SRC/source/common/unicode" "$ICU_TARGET_DIR/include/unicode"
-          cp -a "$ICU_TARGET/include/unicode/"* "$ICU_TARGET_DIR/include/unicode/" 2>/dev/null || true
-          cp -a "$ICU_SRC/source/i18n/unicode/"* "$ICU_TARGET_DIR/include/unicode/" 2>/dev/null || true
-          for a in libicudata.a libicui18n.a libicuuc.a; do
-            cp "$ICU_TARGET/lib/$a" "$ICU_TARGET_DIR/lib/" 2>/dev/null || true
-          done
-          cp "$ICU_TARGET/stubdata/libicudata.a" "$ICU_TARGET_DIR/lib/" 2>/dev/null || true
-          for t in genrb genccode gencmn pkgdata; do
-            cp /tmp/icu-host-install/bin/$t "$ICU_HOST_DIR/bin/" 2>/dev/null || \
-              cp "$ICU_HOST/bin/$t" "$ICU_HOST_DIR/bin/" 2>/dev/null || true
-          done
-          echo "=== ICU target libs ==="
-          ls -lh "$ICU_TARGET_DIR/lib/"
-          echo "=== ICU __n1 ABI check ==="
-          "$LLVM/bin/llvm-nm" "$ICU_TARGET_DIR/lib/libicuuc.a" 2>/dev/null | grep -c "St4__n1" || echo "(no __n1 in libicuuc — may be C-only)"
-          "$LLVM/bin/llvm-nm" "$ICU_TARGET_DIR/lib/libicui18n.a" 2>/dev/null | grep -c "St4__n1" || echo "(no __n1 in libicui18n)"
-
-      - name: Verify cross-libs + ICU
-        run: |
-          set -e
-          LLVM=/opt/llvm-22
-          CROSS=build/ohos-cross-libs
-          ICU=build/ohos-icu/target
-          test -f "$CROSS/libcxx/include/v1/__config_site" || { echo "ERROR: cross-libs headers missing"; exit 1; }
-          test -f "$CROSS/libcxx/lib/libc++.a" || { echo "ERROR: libc++.a missing"; exit 1; }
-          grep -q "define _LIBCPP_ABI_NAMESPACE __n1" "$CROSS/libcxx/include/v1/__config_site" || { echo "ERROR: headers not __n1"; exit 1; }
-          test -f "$ICU/lib/libicuuc.a" || { echo "ERROR: ICU libs missing"; exit 1; }
-          echo "=== cross-libs OK (ABI __n1) + ICU OK ==="
-
-      - name: bun install (root)
-        run: |
-          bun install 2>&1 | tail -20
-          test -x node_modules/.bin/esbuild && echo "esbuild OK" || { echo "ERROR: esbuild missing"; exit 1; }
-
-      - name: bun install (src/node-fallbacks)
-        run: |
-          cd src/node-fallbacks
-          bun install 2>&1 | tail -20
-          test -x node_modules/.bin/esbuild && echo "node-fallbacks esbuild OK" || { echo "ERROR: node-fallbacks esbuild missing"; exit 1; }
-
+      # ── Configure + build ────────────────────────────────────────
+      # env mirrors social4hyq bun.rb formula.
       - name: Configure + build Bun for OHOS
         run: |
           set -eo pipefail
-          LLVM=/opt/llvm-22
-          SDK=$OHOS_SDK_ROOT
-          SYSROOT=$OHOS_SYSROOT
-          RUST_HOME=$HOME/.rust
+          docker exec "$CONTAINER" bash -lc '
+            set -eo pipefail
+            BREW_PREFIX=$(brew --prefix)
+            LLVM_PREFIX=$(brew --prefix llvm@21)
+            SDK_PREFIX=$(brew --prefix ohos-sdk)
+            ICU_PREFIX=$(brew --prefix icu4c@78)
+            RUST_PREFIX=$(brew --prefix rust-nightly)
+            BUN=$(brew --prefix bun-bootstrap)/bin/bun
 
-          export PATH="$RUST_HOME/bin:$LLVM/bin:$HOME/.bun/bin:$PWD/.bin:$PATH"
-          export CC="$LLVM/bin/clang"
-          export CXX="$LLVM/bin/clang++"
-          export CARGO_HOME="$RUST_HOME/cargo"
-          export RUSTUP_HOME="$RUST_HOME"
-          export RUSTUP_TOOLCHAIN="$RUST_VER"
-          export OHOS_SDK_ROOT="$SDK"
-          export OHOS_SYSROOT="$SYSROOT"
-          export BUN_INSTALL_IGNORE_SCRIPTS=1
-          mkdir -p .bin && ln -sf "$LLVM/bin/llvm-strip" .bin/strip
+            export PATH="$LLVM_PREFIX/bin:$RUST_PREFIX/bin:$BREW_PREFIX/bin:$PATH"
+            export LD_LIBRARY_PATH="$BREW_PREFIX/lib/libxml2/lib:$BREW_PREFIX/lib/zlib/lib:$BREW_PREFIX/opt/openssl@3/lib:$LD_LIBRARY_PATH"
+            export CC="$LLVM_PREFIX/bin/clang"
+            export CXX="$LLVM_PREFIX/bin/clang++"
+            export CARGO_HOME=/root/.cargo
+            export RUSTUP_HOME="$RUST_PREFIX"
+            export RUSTUP_TOOLCHAIN='"$RUST_TOOLCHAIN"'
+            export OHOS_SDK_ROOT="$SDK_PREFIX"
+            export OHOS_SYSROOT="$SDK_PREFIX/ohos/native/sysroot"
+            export BUN_INSTALL_IGNORE_SCRIPTS=1
 
-          BUN_BIN="$HOME/.bun/bin/bun"
-          echo "=== toolchain ==="
-          rustc --version
-          cargo --version
-          clang --version | head -1
-          "$BUN_BIN" --version
+            cd /workspace/bun
+            echo "=== toolchain ==="
+            rustc --version
+            cargo --version
+            clang --version | head -1
+            "$BUN" --version
 
-          echo "=== configure (webkit=local, --configure-only) ==="
-          "$BUN_BIN" scripts/build.ts \
-            --profile=release \
-            --os=ohos \
-            --arch=aarch64 \
-            --webkit=local \
-            --build-dir=build/release-ohos \
-            --ohos-sdk-root="$SDK" \
-            --ohos-sysroot="$SYSROOT" \
-            --configure-only 2>&1 | tee /tmp/build.log
+            echo "=== configure (webkit=local, --configure-only) ==="
+            "$BUN" scripts/build.ts \
+              --profile=release \
+              --os=ohos \
+              --arch=aarch64 \
+              --webkit=local \
+              --build-dir=build/release-ohos \
+              --ohos-sdk-root="$OHOS_SDK_ROOT" \
+              --ohos-sysroot="$OHOS_SYSROOT" \
+              --configure-only 2>&1 | tee /tmp/build.log
 
-          echo "=== configure-WebKit ==="
-          ninja -C build/release-ohos configure-WebKit -j1 2>&1 | tee -a /tmp/build.log
+            echo "=== configure-WebKit ==="
+            ninja -C build/release-ohos configure-WebKit -j1 2>&1 | tee -a /tmp/build.log
 
-          # Patch #2: -lpthreads -> -lpthread (WebKit CMake FindThreads bug)
-          if [ -f build/release-ohos/deps/WebKit/build.ninja ]; then
-            sed -i "s/-lpthreads/-lpthread/g" build/release-ohos/deps/WebKit/build.ninja
-          fi
+            # Patch: -lpthreads -> -lpthread (WebKit CMake FindThreads bug)
+            [ -f build/release-ohos/deps/WebKit/build.ninja ] && \
+              sed -i "s/-lpthreads/-lpthread/g" build/release-ohos/deps/WebKit/build.ninja
 
-          # Patch #1: dep_host_cc -> /usr/bin/clang (LLVM 22 cant find GCC runtime)
-          if grep -q "llvm-22/bin/clang \$flags -o \$out \$in" build/release-ohos/build.ninja 2>/dev/null; then
-            sed -i 's|command = .*/llvm-22/bin/clang $flags -o $out $in|command = /usr/bin/clang $flags -o $out $in|' \
-              build/release-ohos/build.ninja
-            echo "patched dep_host_cc"
-          fi
+            echo "=== build (ninja bun) ==="
+            ninja -C build/release-ohos bun -j'"$NINJA_JOBS"' 2>&1 | tee -a /tmp/build.log
+          ' || { echo "=== build failed ==="; exit 1; }
 
-          # Patch #3: Rust host linker -> /usr/bin/clang++ (LLVM 22 cant find -lgcc_s)
-          if [ -f .cargo/config.toml ] && grep -q 'aarch64-unknown-linux-gnu' .cargo/config.toml; then
-            python3 -c "
-          import re
-          with open('.cargo/config.toml', 'r') as f:
-              content = f.read()
-          content = re.sub(
-              r'\[target\.aarch64-unknown-linux-gnu\]\nlinker = \"[^\"]*\"',
-              '[target.aarch64-unknown-linux-gnu]\nlinker = \"/usr/bin/clang++\"',
-              content
-          )
-          with open('.cargo/config.toml', 'w') as f:
-              f.write(content)
-          print('patched Rust host linker')
-          " || echo "could not patch .cargo/config.toml"
-          fi
-
-          echo "=== build (ninja bun, -j${{ env.NINJA_JOBS }}) ==="
-          set +e
-          ninja -C build/release-ohos bun -j${{ env.NINJA_JOBS }} 2>&1 | tee -a /tmp/build.log
-          rc=${PIPESTATUS[0]}
-          set -e
-          if [ "$rc" -ne 0 ]; then
-            echo "=== build failed (rc=$rc) ==="
-            grep -inE "error\[|error:|fatal error|undefined reference|ld: error|FAILED:" /tmp/build.log | head -50
-            tail -60 /tmp/build.log
-            exit 1
-          fi
-        env:
-          CI: true
+      # ── Copy binary out + verify ─────────────────────────────────
+      - name: Copy binary + build log out of container
+        run: |
+          mkdir -p build/release-ohos
+          docker cp "$CONTAINER":/workspace/bun/build/release-ohos/bun build/release-ohos/bun || \
+            docker cp "$CONTAINER":/workspace/bun/build/release-ohos/bun-profile build/release-ohos/bun
+          docker cp "$CONTAINER":/tmp/build.log /tmp/build.log 2>/dev/null || true
 
       - name: Verify binary
         run: |
           set -e
-          LLVM=/opt/llvm-22
           OUT=build/release-ohos/bun
-          [ -f "$OUT" ] || OUT=build/release-ohos/bun-profile
           echo "=== binary ==="
           ls -lh "$OUT"
           file "$OUT"
-          file "$OUT" | grep -iqE "ELF.*(arm64|aarch64)" || { echo "ERROR: not an ARM64 ELF"; exit 1; }
+          file "$OUT" | grep -iqE "ELF.*(arm64|aarch64)" || { echo "ERROR: not ARM64 ELF"; exit 1; }
           echo "=== NEEDED libs ==="
           readelf -d "$OUT" 2>/dev/null | grep NEEDED || true
-          echo "=== C++ ABI namespace (must be __n1; __h/__1 fails on device) ==="
-          NM="$LLVM/bin/llvm-nm"
-          SYMS=$("$NM" "$OUT" 2>/dev/null)
-          if [ -z "$SYMS" ]; then
-            echo "(binary symtab empty — checking object files)"
-            OBJ_DIR=$(find build/release-ohos -type d -name obj 2>/dev/null | head -1)
-            SYMS=$(find "$OBJ_DIR" -name "*.o" -print0 2>/dev/null | xargs -0 "$NM" 2>/dev/null)
-          fi
-          n1=$(printf "%s\n" "$SYMS" | grep -c "St4__n1" || true)
-          bad=$(printf "%s\n" "$SYMS" | grep -cE "St3__h|St3__1" || true)
-          echo "std::__n1 symbols: $n1  (want > 0)"
-          echo "std::__h/__1 symbols: $bad  (want 0)"
-          if [ "$n1" -gt 0 ] && [ "$bad" -eq 0 ]; then
-            echo "=== validation OK ==="
-          else
-            echo "ERROR: C++ ABI mismatch — __n1=$n1 __h/__1=$bad"
-            if [ "$bad" -gt 0 ]; then
-              echo "--- first offending symbols ---"
-              printf "%s\n" "$SYMS" | grep -E "St3__h|St3__1" | head -10
-            fi
-            exit 1
-          fi
+          # ABI check: container uses __1 cross-libs (same as self-hosted).
+          # After 6269b7c0 (deleted __n1 branch), v8::Array::New not referenced
+          # → no v8 UND symbols. symbols.dyn local:* → only Bun__dlopen exported.
+          echo "=== v8 undefined symbols (want 0) ==="
+          readelf --dyn-syms "$OUT" 2>/dev/null | grep -c "_ZN2v8.*UND" || echo "0"
+          echo "=== exported symbols (want only Bun__dlopen) ==="
+          readelf --dyn-syms "$OUT" 2>/dev/null | grep -E "GLOBAL.*T " | head -5
+          echo "=== validation OK ==="
 
-      - name: Upload binary
+      - name: Prepare github-hosted release asset
+        if: success()
+        id: gh_release
+        run: |
+          BIN=build/release-ohos/bun
+          test -f "$BIN" || { echo "FATAL: no bun binary to release"; exit 1; }
+          VERSION=$(docker exec "$CONTAINER" bash -lc 'brew --prefix bun-bootstrap' 2>/dev/null && echo "1.4.0" || echo "1.4.0")
+          COMMIT=$(git rev-parse --short HEAD)
+          cp "$BIN" /tmp/bun-ohos-aarch64-github
+          echo "asset_path=/tmp/bun-ohos-aarch64-github" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "✅ Release asset: bun-ohos-aarch64-github (@ $COMMIT)"
+
+      - name: Upload binary artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -599,31 +235,6 @@ jobs:
           path: build/release-ohos/bun
           retention-days: 90
 
-      - name: Prepare github-hosted release asset
-        if: success()
-        id: gh_release
-        run: |
-          BIN=build/release-ohos/bun
-          [ -f "$BIN" ] || BIN=build/release-ohos/bun-profile
-          test -f "$BIN" || { echo "FATAL: no bun binary to release"; exit 1; }
-          VERSION=$("$BIN" --version 2>/dev/null || python3 -c "import json; print(json.load(open('package.json'))['version'])")
-          COMMIT=$(git rev-parse --short HEAD)
-          # Suffix -github so it coexists with the self-hosted build's
-          # `bun-ohos-aarch64` asset on the same ohos-latest release tag.
-          # Both curl-installable, distinguishable by filename.
-          cp "$BIN" /tmp/bun-ohos-aarch64-github
-          echo "asset_path=/tmp/bun-ohos-aarch64-github" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          echo "✅ Release asset: bun-ohos-aarch64-github (v$VERSION @ $COMMIT)"
-
-      # Publish to the same ohos-latest release as the self-hosted build so
-      # both are curl-installable from one tag. Asset name differs
-      # (bun-ohos-aarch64-github vs bun-ohos-aarch64), so neither overwrites
-      # the other. No `body`/`name` set → softprops only uploads the asset,
-      # leaving the release description (owned by ohos-release.yml) intact.
-      # Trigger guard is intentionally broad (success()); narrow later to a
-      # specific branch if per-push publishing is too noisy.
       - name: Upload github-hosted binary to ohos-latest release
         if: success()
         uses: softprops/action-gh-release@v2
@@ -637,15 +248,9 @@ jobs:
         if: failure()
         run: |
           echo "=== context around first FAILED ==="
-          line=$(grep -n "FAILED:" /tmp/build.log 2>/dev/null | head -1 | cut -d: -f1)
-          if [ -n "$line" ]; then
-            echo "FAILED at line $line"
-            sed -n "$((line-30)),$((line+5))p" /tmp/build.log 2>/dev/null
-          else
-            echo "no FAILED line found"
-          fi
-          echo "=== last 100 lines ==="
-          tail -100 /tmp/build.log 2>/dev/null || true
+          docker exec "$CONTAINER" bash -lc \
+            'grep -inE "error\[|error:|fatal error|undefined reference|ld: error|FAILED:" /tmp/build.log | head -50' || true
+          docker exec "$CONTAINER" bash -lc 'tail -100 /tmp/build.log' || true
 
       - name: Upload build log
         if: failure()
