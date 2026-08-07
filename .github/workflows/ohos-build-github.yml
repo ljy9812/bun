@@ -87,22 +87,19 @@ jobs:
           # brew trust social4hyq tap
           docker exec "$CONTAINER" bash -lc "brew tap $TAP" || true
 
-      # ── Verify toolchain (preinstalled in ci-runner image) ───────
-      # The ci-runner image already has Harmonybrew core bottles installed
-      # (llvm@21, ohos-sdk, icu4c@78, rust-nightly, bun-bootstrap, etc).
-      # We only verify they exist — no brew install needed.
-      - name: Verify container toolchain
+      # ── Install toolchain deps (via bun formula's dependencies) ──
+      # social4hyq's bun.rb formula declares all OHOS toolchain deps:
+      #   depends_on "llvm@21", "ohos-sdk", "bun-bootstrap", "icu4c@78", etc
+      #   resource "rust-nightly" (aarch64-unknown-linux-ohos tarball)
+      # We install ONLY the deps (not bun itself — we build our own source).
+      # --only-dependencies skips bun's install block, pours all deps + resources.
+      # bun-webkit is a dep but we use --webkit=local (our fork), so skip it.
+      - name: Install toolchain deps (bun formula deps only)
         run: |
-          docker exec "$CONTAINER" bash -lc '
-            echo "=== brew list (key deps) ==="
-            brew list --versions llvm@21 ohos-sdk icu4c@78 rust-nightly bun-bootstrap cmake ninja 2>&1
-            echo "=== clang ==="
-            $(brew --prefix llvm@21)/bin/clang --version | head -1
-            echo "=== rustc ==="
-            $(brew --prefix rust-nightly)/bin/rustc --version
-            echo "=== bun ==="
-            $(brew --prefix bun-bootstrap)/bin/bun --version
-          '
+          docker exec "$CONTAINER" bash -lc \
+            "$BREW_ENV brew install --only-dependencies --force-bottle $TAP/bun" \
+            2>&1 | tail -30
+          echo "install_exit=$?"
 
       # ── WebKit fork (pinned, --webkit=local) ─────────────────────
       - name: Checkout WebKit fork (pinned)
