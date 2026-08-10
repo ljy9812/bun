@@ -259,10 +259,17 @@ jobs:
       # ── Scaffold cross-libs + ICU + Configure + build ────────────
       # Delegates to .github/scripts/build-ohos-container.sh (replicates
       # social4hyq bun.rb's install-block env). Host vars passed via -e.
+      # GITHUB_SHA: the container has no git (Harmonybrew musl), so config.ts's
+      # getGitRevision() can't `git rev-parse HEAD` and would return "unknown"
+      # (7 chars). That feeds build_options::SHA, and env.rs:58 does
+      # const_str_slice(SHA, 0, 9) → split_at(9) panics "mid > len" (E0080).
+      # getGitRevision checks GITHUB_SHA first (config.ts:1526), so passing it
+      # in gives the full 40-char commit directly.
       - name: Scaffold + Configure + build Bun for OHOS
         run: |
           set -e
           docker exec -e RUST_TOOLCHAIN="$RUST_TOOLCHAIN" -e NINJA_JOBS="$NINJA_JOBS" \
+            -e GITHUB_SHA="$GITHUB_SHA" -e GIT_SHA="$GITHUB_SHA" \
             "$CONTAINER" bash /workspace/bun/.github/scripts/build-ohos-container.sh
 
       # ── Copy binary out + verify ─────────────────────────────────

@@ -68,6 +68,26 @@ unset RUSTC_WRAPPER || true                 # bun.rb 230 (clear sccache etc.)
 ca_bundle="$BREW_PREFIX/etc/ca-certificates/cert.pem"
 [ -f "$ca_bundle" ] && export SSL_CERT_FILE="$ca_bundle" CURL_CA_BUNDLE="$ca_bundle" || true
 
+# ── Git SHA for build_options.rs ──────────────────────────────────────
+# config.ts getGitRevision() reads GITHUB_SHA first, then `git rev-parse HEAD`,
+# then falls back to the literal "unknown". The container has no git
+# (Harmonybrew musl), so rev-parse throws and getGitRevision returns "unknown"
+# (7 chars). That lands in build_options::SHA; env.rs:58 then does
+# const_str_slice(SHA, 0, 9) → split_at(9) → const-eval panic "mid > len"
+# (E0080) during `cargo build`. The workflow passes GITHUB_SHA via docker exec
+# -e; mirror it into GIT_SHA (the third env var getGitRevision checks) so the
+# bun configure subprocess definitely sees a 40-char SHA regardless of how the
+# runtime reshuffles env. If somehow empty, derive from the checkout dir.
+if [ -z "${GITHUB_SHA:-}" ]; then
+  GITHUB_SHA=$(git -C "$SRC" rev-parse HEAD 2>/dev/null || true)
+fi
+if [ -n "$GITHUB_SHA" ]; then
+  export GITHUB_SHA GIT_SHA="$GITHUB_SHA"
+  echo "=== build SHA: $GITHUB_SHA ==="
+else
+  echo "::warning::no GITHUB_SHA and git rev-parse failed; build_options::SHA will be 'unknown' (env.rs const_str_slice panic risk)"
+fi
+
 echo "=== toolchain ==="
 rustc --version
 cargo --version
