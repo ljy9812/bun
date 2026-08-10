@@ -142,9 +142,10 @@ jobs:
           # pours ONLY runtime deps (just `node`) → llvm@21 missing → build
           # dies downstream. --build-bottle implies --include-build semantics;
           # it's exactly what social4hyq build.sh uses.
+          # No --force-bottle: it is mutually exclusive with --build-bottle.
           for i in 1 2; do
             if docker exec "$CONTAINER" bash -lc \
-              "$BREW_ENV brew install --only-dependencies --build-bottle --force-bottle $TAP/bun" 2>&1 | tail -40; then
+              "$BREW_ENV brew install --only-dependencies --build-bottle $TAP/bun" 2>&1 | tail -40; then
               break
             fi
             [ "$i" = 2 ] && { echo "::error::brew install --only-dependencies failed after retry"; exit 1; }
