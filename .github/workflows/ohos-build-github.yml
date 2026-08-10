@@ -135,9 +135,15 @@ jobs:
             || echo "::warning::brew update failed; continuing with baked index"
           # Retry once after 90s for transient atomgit CDN 404s (social4hyq
           # build.sh lines 41-48 — brew reuses partial work).
+          # --include-build is REQUIRED: bun.rb marks llvm@21, ohos-sdk,
+          # icu4c@78, bun-bootstrap, openssl@3, cmake, ninja as :build deps;
+          # `--only-dependencies` alone pours ONLY runtime deps (just `node`)
+          # and silently skips every :build dep → llvm@21 missing → build
+          # dies downstream. social4hyq build.sh uses `--build-bottle`, which
+          # implies --include-build; --only-dependencies does not.
           for i in 1 2; do
             if docker exec "$CONTAINER" bash -lc \
-              "$BREW_ENV brew install --only-dependencies --force-bottle $TAP/bun" 2>&1 | tail -40; then
+              "$BREW_ENV brew install --only-dependencies --include-build --force-bottle $TAP/bun" 2>&1 | tail -40; then
               break
             fi
             [ "$i" = 2 ] && { echo "::error::brew install --only-dependencies failed after retry"; exit 1; }
