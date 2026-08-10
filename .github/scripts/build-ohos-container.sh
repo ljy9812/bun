@@ -41,12 +41,14 @@ SRC=/workspace/bun
 cd "$SRC"
 
 # ── Build environment (bun.rb lines 192-247) ──────────────────────────
-# rust cargo NEEDS libssl/libcrypto (brew openssl@3); without it the musl
-# loader hits "Error relocating cargo: SSL_get_error: symbol not found" → 127
-# (bun.rb line 197-199 documents this exact failure).
-# lld from llvm@21 has runtime deps on libxml2/zlib; brew superenv strips
-# system lib paths, so inject them explicitly (bun.rb lines 195-199).
-export LD_LIBRARY_PATH="$BREW_PREFIX/opt/openssl@3/lib:$BREW_PREFIX/lib/libxml2/lib:$BREW_PREFIX/lib/zlib/lib:${LD_LIBRARY_PATH:-}"
+# rust cargo NEEDS libssl/libcrypto/libz (git2/registry transport); without
+# them the musl loader hits "Error relocating cargo: SSL_get_error/zlibVersion:
+# symbol not found" → 127 (bun.rb lines 195-199 document this exact failure).
+# lld from llvm@21 also has runtime deps on libxml2/zlib; brew superenv
+# strips system lib paths, so inject them explicitly (bun.rb lines 195-199).
+# IMPORTANT: brew installs these under opt/<name>/lib (formula_opt_lib), NOT
+# lib/<name>/lib — using the wrong path silently leaves libz.so unfound.
+export LD_LIBRARY_PATH="$BREW_PREFIX/opt/openssl@3/lib:$BREW_PREFIX/opt/libxml2/lib:$BREW_PREFIX/opt/zlib/lib:${LD_LIBRARY_PATH:-}"
 # llvm@21 only ships llvm-strip; bun's build script needs `strip` (bun.rb 201-202).
 mkdir -p .bin
 ln -sf "$LLVM_PREFIX/bin/llvm-strip" .bin/strip

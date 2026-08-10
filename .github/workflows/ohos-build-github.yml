@@ -200,8 +200,9 @@ jobs:
             # Same LD_LIBRARY_PATH the build script sets later, but the cargo
             # verification below runs BEFORE that script — inject here too.
             # (bun.rb lines 195-199 document this exact cargo/openssl failure.)
+            # Paths use opt/<name>/lib (formula_opt_lib), NOT lib/<name>/lib.
             BREW_PREFIX=$(brew --prefix)
-            export LD_LIBRARY_PATH="$BREW_PREFIX/opt/openssl@3/lib:$BREW_PREFIX/lib/libxml2/lib:$BREW_PREFIX/lib/zlib/lib:${LD_LIBRARY_PATH:-}"
+            export LD_LIBRARY_PATH="$BREW_PREFIX/opt/openssl@3/lib:$BREW_PREFIX/opt/libxml2/lib:$BREW_PREFIX/opt/zlib/lib:${LD_LIBRARY_PATH:-}"
             "$RUST_HOME/bin/rustc" --version
             "$RUST_HOME/bin/cargo" --version
           '
