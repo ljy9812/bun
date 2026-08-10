@@ -74,6 +74,48 @@ cargo --version
 clang --version | head -1
 "$BUN_BOOT_DIR/bun" --version
 
+# ── esbuild OHOS platform fix ──────────────────────────────────────────
+# esbuild's npm shim (node_modules/.bin/esbuild, shebang #!/usr/bin/env
+# node) locates its native binary via process.platform. OHOS node reports
+# "openharmony", which esbuild's knownPlatformPackages map doesn't list →
+# "Unsupported platform: openharmony arm64 LE". (Self-hosted dodges this
+# only because its build dir persists across runs, so ninja skips already-
+# generated esbuild outputs; our ephemeral container re-runs every rule.)
+#
+# ESBUILD_BINARY_PATH bypasses ALL platform detection — esbuild's
+# generateBinPath checks it first and returns it directly (esbuild@0.21.5
+# bin/esbuild:116, confirmed via source). Point it at the @esbuild/linux-arm64
+# native binary: a statically-linked Go binary that runs on musl (CGO_ENABLED=0).
+#
+# @esbuild/linux-arm64 is an optionalDependency filtered by {os:linux}.
+# bun-bootstrap reports process.platform="openharmony" → bun skips it. So
+# force-install it explicitly; if bun still refuses (os filtering on explicit
+# installs), extract the tarball directly from the npm registry (the runner is
+# GitHub-hosted, not behind the China network — registry.npmjs.org is direct).
+ESBUILD_BIN="$SRC/node_modules/@esbuild/linux-arm64/bin/esbuild"
+if [ ! -x "$ESBUILD_BIN" ]; then
+  echo "=== @esbuild/linux-arm64 missing (bun skipped: openharmony≠linux), force-installing ==="
+  "$BUN_BOOT_DIR/bun" add @esbuild/linux-arm64@0.21.5 --no-save 2>&1 | tail -3 || true
+fi
+if [ ! -x "$ESBUILD_BIN" ]; then
+  echo "=== bun add refused (os filtering); extracting tarball directly ==="
+  mkdir -p "$SRC/node_modules/@esbuild"
+  curl -fsSL "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-0.21.5.tgz" -o /tmp/esbuild-arm64.tgz
+  mkdir -p /tmp/esbuild-arm64-x
+  tar xzf /tmp/esbuild-arm64.tgz -C /tmp/esbuild-arm64-x
+  mv /tmp/esbuild-arm64-x/package "$SRC/node_modules/@esbuild/linux-arm64"
+  rm -rf /tmp/esbuild-arm64.tgz /tmp/esbuild-arm64-x
+fi
+if [ ! -x "$ESBUILD_BIN" ]; then
+  echo "ERROR: $ESBUILD_BIN not found after force-install; esbuild rules will fail"
+  exit 1
+fi
+# Verify the native binary actually runs on this musl userspace (it must —
+# esbuild execs it; a glibc-linked binary would fail here).
+"$ESBUILD_BIN" --version || { echo "ERROR: esbuild native binary won't execute (not static?)"; exit 1; }
+export ESBUILD_BINARY_PATH="$ESBUILD_BIN"
+echo "=== ESBUILD_BINARY_PATH=$ESBUILD_BINARY_PATH ==="
+
 # ── Scaffold ohos-cross-libs (bun.rb lines 204-219) ────────────────────
 # bun flags.ts expects ohosCrossLibs to contain libcxx/include/v1/ and
 # libcxxabi/include/. llvm@21 ships aarch64-linux-ohos cross runtimes
