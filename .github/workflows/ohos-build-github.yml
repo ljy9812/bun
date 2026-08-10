@@ -193,6 +193,15 @@ jobs:
             else
               echo "=== rust already installed ==="
             fi
+            # cargo links libssl/libcrypto/libz (git2/registry transport);
+            # rustc does NOT — that is why `rustc --version` passed while
+            # `cargo --version` hit "Error loading shared library libssl.so"
+            # → "Error relocating cargo: SSL_get_error: symbol not found" → 127.
+            # Same LD_LIBRARY_PATH the build script sets later, but the cargo
+            # verification below runs BEFORE that script — inject here too.
+            # (bun.rb lines 195-199 document this exact cargo/openssl failure.)
+            BREW_PREFIX=$(brew --prefix)
+            export LD_LIBRARY_PATH="$BREW_PREFIX/opt/openssl@3/lib:$BREW_PREFIX/lib/libxml2/lib:$BREW_PREFIX/lib/zlib/lib:${LD_LIBRARY_PATH:-}"
             "$RUST_HOME/bin/rustc" --version
             "$RUST_HOME/bin/cargo" --version
           '
